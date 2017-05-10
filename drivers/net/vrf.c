@@ -274,11 +274,6 @@ static netdev_tx_t vrf_process_v4_outbound(struct sk_buff *skb,
 	if (IS_ERR(rt))
 		goto err;
 
-	if (rt->rt_type != RTN_UNICAST && rt->rt_type != RTN_LOCAL) {
-		ip_rt_put(rt);
-		goto err;
-	}
-
 	skb_dst_drop(skb);
 
 	/* if dst.dev is loopback or the VRF device again this is locally
@@ -346,6 +341,7 @@ static netdev_tx_t is_ip_tx_frame(struct sk_buff *skb, struct net_device *dev)
 
 static netdev_tx_t vrf_xmit(struct sk_buff *skb, struct net_device *dev)
 {
+	int len = skb->len;
 	netdev_tx_t ret = is_ip_tx_frame(skb, dev);
 
 	if (likely(ret == NET_XMIT_SUCCESS || ret == NET_XMIT_CN)) {
@@ -353,7 +349,7 @@ static netdev_tx_t vrf_xmit(struct sk_buff *skb, struct net_device *dev)
 
 		u64_stats_update_begin(&dstats->syncp);
 		dstats->tx_pkts++;
-		dstats->tx_bytes += skb->len;
+		dstats->tx_bytes += len;
 		u64_stats_update_end(&dstats->syncp);
 	} else {
 		this_cpu_inc(dev->dstats->tx_drps);
@@ -466,8 +462,10 @@ static void vrf_rt6_release(struct net_device *dev, struct net_vrf *vrf)
 	}
 
 	if (rt6_local) {
-		if (rt6_local->rt6i_idev)
+		if (rt6_local->rt6i_idev) {
 			in6_dev_put(rt6_local->rt6i_idev);
+			rt6_local->rt6i_idev = NULL;
+		}
 
 		dst = &rt6_local->dst;
 		dev_put(dst->dev);
@@ -616,6 +614,10 @@ static struct sk_buff *vrf_ip_out(struct net_device *vrf_dev,
 	struct net_vrf *vrf = netdev_priv(vrf_dev);
 	struct dst_entry *dst = NULL;
 	struct rtable *rth;
+
+	/* don't divert multicast */
+	if (ipv4_is_multicast(ip_hdr(skb)->daddr))
+		return skb;
 
 	rcu_read_lock();
 
@@ -1004,6 +1006,9 @@ static struct sk_buff *vrf_ip_rcv(struct net_device *vrf_dev,
 	skb->skb_iif = vrf_dev->ifindex;
 	IPCB(skb)->flags |= IPSKB_L3SLAVE;
 
+	if (ipv4_is_multicast(ip_hdr(skb)->daddr))
+		goto out;
+
 	/* loopback traffic; do not push through packet taps again.
 	 * Reset pkt_type for upper layers to process skb
 	 */
@@ -1121,7 +1126,7 @@ static int vrf_fib_rule(const struct net_device *dev, __u8 family, bool add_it)
 		goto nla_put_failure;
 
 	/* rule only needs to appear once */
-	nlh->nlmsg_flags &= NLM_F_EXCL;
+	nlh->nlmsg_flags |= NLM_F_EXCL;
 
 	frh = nlmsg_data(nlh);
 	memset(frh, 0, sizeof(*frh));
@@ -1169,7 +1174,18 @@ static int vrf_add_fib_rules(const struct net_device *dev)
 	if (err < 0)
 		goto ipv6_err;
 
+#if IS_ENABLED(CONFIG_IP_MROUTE_MULTIPLE_TABLES)
+	err = vrf_fib_rule(dev, RTNL_FAMILY_IPMR, true);
+	if (err < 0)
+		goto ipmr_err;
+#endif
+
 	return 0;
+
+#if IS_ENABLED(CONFIG_IP_MROUTE_MULTIPLE_TABLES)
+ipmr_err:
+	vrf_fib_rule(dev, AF_INET6,  false);
+#endif
 
 ipv6_err:
 	vrf_fib_rule(dev, AF_INET,  false);

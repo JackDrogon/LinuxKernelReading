@@ -218,17 +218,19 @@ static int elan_query_product(struct elan_tp_data *data)
 
 static int elan_check_ASUS_special_fw(struct elan_tp_data *data)
 {
-	if (data->ic_type != 0x0E)
-		return false;
-
-	switch (data->product_id) {
-	case 0x05 ... 0x07:
-	case 0x09:
-	case 0x13:
+	if (data->ic_type == 0x0E) {
+		switch (data->product_id) {
+		case 0x05 ... 0x07:
+		case 0x09:
+		case 0x13:
+			return true;
+		}
+	} else if (data->ic_type == 0x08 && data->product_id == 0x26) {
+		/* ASUS EeeBook X205TA */
 		return true;
-	default:
-		return false;
 	}
+
+	return false;
 }
 
 static int __elan_initialize(struct elan_tp_data *data)
@@ -1093,19 +1095,18 @@ static int elan_probe(struct i2c_client *client,
 	if (error)
 		return error;
 
+	dev_info(&client->dev,
+		 "Elan Touchpad: Module ID: 0x%04x, Firmware: 0x%04x, Sample: 0x%04x, IAP: 0x%04x\n",
+		 data->product_id,
+		 data->fw_version,
+		 data->sm_version,
+		 data->iap_version);
+
 	dev_dbg(&client->dev,
-		"Elan Touchpad Information:\n"
-		"    Module product ID:  0x%04x\n"
-		"    Firmware Version:  0x%04x\n"
-		"    Sample Version:  0x%04x\n"
-		"    IAP Version:  0x%04x\n"
+		"Elan Touchpad Extra Information:\n"
 		"    Max ABS X,Y:   %d,%d\n"
 		"    Width X,Y:   %d,%d\n"
 		"    Resolution X,Y:   %d,%d (dots/mm)\n",
-		data->product_id,
-		data->fw_version,
-		data->sm_version,
-		data->iap_version,
 		data->max_x, data->max_y,
 		data->width_x, data->width_y,
 		data->x_res, data->y_res);
@@ -1232,6 +1233,7 @@ static const struct acpi_device_id elan_acpi_id[] = {
 	{ "ELAN0000", 0 },
 	{ "ELAN0100", 0 },
 	{ "ELAN0600", 0 },
+	{ "ELAN0605", 0 },
 	{ "ELAN1000", 0 },
 	{ }
 };

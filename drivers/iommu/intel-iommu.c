@@ -915,7 +915,7 @@ static struct intel_iommu *device_to_iommu(struct device *dev, u8 *bus, u8 *devf
 				 * which we used for the IOMMU lookup. Strictly speaking
 				 * we could do this for all PCI devices; we only need to
 				 * get the BDF# from the scope table for ACPI matches. */
-				if (pdev->is_virtfn)
+				if (pdev && pdev->is_virtfn)
 					goto got_pdev;
 
 				*bus = drhd->devices[i].bus;
@@ -3325,13 +3325,14 @@ static int __init init_dmars(void)
 	iommu_identity_mapping |= IDENTMAP_GFX;
 #endif
 
+	check_tylersburg_isoch();
+
 	if (iommu_identity_mapping) {
 		ret = si_domain_init(hw_pass_through);
 		if (ret)
 			goto free_iommu;
 	}
 
-	check_tylersburg_isoch();
 
 	/*
 	 * If we copied translations from a previous kernel in the kdump
@@ -4707,24 +4708,12 @@ static void free_all_cpu_cached_iovas(unsigned int cpu)
 	}
 }
 
-static int intel_iommu_cpu_notifier(struct notifier_block *nfb,
-				    unsigned long action, void *v)
+static int intel_iommu_cpu_dead(unsigned int cpu)
 {
-	unsigned int cpu = (unsigned long)v;
-
-	switch (action) {
-	case CPU_DEAD:
-	case CPU_DEAD_FROZEN:
-		free_all_cpu_cached_iovas(cpu);
-		flush_unmaps_timeout(cpu);
-		break;
-	}
-	return NOTIFY_OK;
+	free_all_cpu_cached_iovas(cpu);
+	flush_unmaps_timeout(cpu);
+	return 0;
 }
-
-static struct notifier_block intel_iommu_cpu_nb = {
-	.notifier_call = intel_iommu_cpu_notifier,
-};
 
 static ssize_t intel_iommu_show_version(struct device *dev,
 					struct device_attribute *attr,
@@ -4874,8 +4863,8 @@ int __init intel_iommu_init(void)
 	bus_register_notifier(&pci_bus_type, &device_nb);
 	if (si_domain && !hw_pass_through)
 		register_memory_notifier(&intel_iommu_memory_nb);
-	register_hotcpu_notifier(&intel_iommu_cpu_nb);
-
+	cpuhp_setup_state(CPUHP_IOMMU_INTEL_DEAD, "iommu/intel:dead", NULL,
+			  intel_iommu_cpu_dead);
 	intel_iommu_enabled = 1;
 
 	return 0;

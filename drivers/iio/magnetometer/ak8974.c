@@ -287,7 +287,7 @@ static int ak8974_await_drdy(struct ak8974 *ak8974)
 	return 0;
 }
 
-static int ak8974_getresult(struct ak8974 *ak8974, s16 *result)
+static int ak8974_getresult(struct ak8974 *ak8974, __le16 *result)
 {
 	unsigned int src;
 	int ret;
@@ -395,7 +395,7 @@ static int ak8974_selftest(struct ak8974 *ak8974)
 static int ak8974_get_u16_val(struct ak8974 *ak8974, u8 reg, u16 *val)
 {
 	int ret;
-	u16 bulk;
+	__le16 bulk;
 
 	ret = regmap_bulk_read(ak8974->map, reg, &bulk, 2);
 	if (ret)
@@ -453,7 +453,7 @@ static int ak8974_read_raw(struct iio_dev *indio_dev,
 			   long mask)
 {
 	struct ak8974 *ak8974 = iio_priv(indio_dev);
-	s16 hw_values[3];
+	__le16 hw_values[3];
 	int ret = -EINVAL;
 
 	pm_runtime_get_sync(&ak8974->i2c->dev);
@@ -494,7 +494,7 @@ static void ak8974_fill_buffer(struct iio_dev *indio_dev)
 {
 	struct ak8974 *ak8974 = iio_priv(indio_dev);
 	int ret;
-	s16 hw_values[8]; /* Three axes + 64bit padding */
+	__le16 hw_values[8]; /* Three axes + 64bit padding */
 
 	pm_runtime_get_sync(&ak8974->i2c->dev);
 	mutex_lock(&ak8974->lock);
@@ -767,7 +767,7 @@ power_off:
 	return ret;
 }
 
-static int __exit ak8974_remove(struct i2c_client *i2c)
+static int ak8974_remove(struct i2c_client *i2c)
 {
 	struct iio_dev *indio_dev = i2c_get_clientdata(i2c);
 	struct ak8974 *ak8974 = iio_priv(indio_dev);
@@ -849,7 +849,7 @@ static struct i2c_driver ak8974_driver = {
 		.of_match_table = of_match_ptr(ak8974_of_match),
 	},
 	.probe	  = ak8974_probe,
-	.remove	  = __exit_p(ak8974_remove),
+	.remove	  = ak8974_remove,
 	.id_table = ak8974_id,
 };
 module_i2c_driver(ak8974_driver);

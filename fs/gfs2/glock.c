@@ -21,7 +21,7 @@
 #include <linux/list.h>
 #include <linux/wait.h>
 #include <linux/module.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
 #include <linux/kthread.h>
@@ -658,9 +658,11 @@ int gfs2_glock_get(struct gfs2_sbd *sdp, u64 number,
 	struct kmem_cache *cachep;
 	int ret, tries = 0;
 
+	rcu_read_lock();
 	gl = rhashtable_lookup_fast(&gl_hash_table, &name, ht_parms);
 	if (gl && !lockref_get_not_dead(&gl->gl_lockref))
 		gl = NULL;
+	rcu_read_unlock();
 
 	*glp = gl;
 	if (gl)
@@ -695,7 +697,7 @@ int gfs2_glock_get(struct gfs2_sbd *sdp, u64 number,
 	gl->gl_target = LM_ST_UNLOCKED;
 	gl->gl_demote_state = LM_ST_EXCLUSIVE;
 	gl->gl_ops = glops;
-	gl->gl_dstamp = ktime_set(0, 0);
+	gl->gl_dstamp = 0;
 	preempt_disable();
 	/* We use the global stats to estimate the initial per-glock stats */
 	gl->gl_stats = this_cpu_ptr(sdp->sd_lkstats)->lkstats[glops->go_type];
@@ -728,15 +730,18 @@ again:
 
 	if (ret == -EEXIST) {
 		ret = 0;
+		rcu_read_lock();
 		tmp = rhashtable_lookup_fast(&gl_hash_table, &name, ht_parms);
 		if (tmp == NULL || !lockref_get_not_dead(&tmp->gl_lockref)) {
 			if (++tries < 100) {
+				rcu_read_unlock();
 				cond_resched();
 				goto again;
 			}
 			tmp = NULL;
 			ret = -ENOMEM;
 		}
+		rcu_read_unlock();
 	} else {
 		WARN_ON_ONCE(ret);
 	}

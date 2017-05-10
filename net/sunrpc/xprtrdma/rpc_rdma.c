@@ -125,14 +125,34 @@ void rpcrdma_set_max_header_sizes(struct rpcrdma_xprt *r_xprt)
 /* The client can send a request inline as long as the RPCRDMA header
  * plus the RPC call fit under the transport's inline limit. If the
  * combined call message size exceeds that limit, the client must use
- * the read chunk list for this operation.
+ * a Read chunk for this operation.
+ *
+ * A Read chunk is also required if sending the RPC call inline would
+ * exceed this device's max_sge limit.
  */
 static bool rpcrdma_args_inline(struct rpcrdma_xprt *r_xprt,
 				struct rpc_rqst *rqst)
 {
-	struct rpcrdma_ia *ia = &r_xprt->rx_ia;
+	struct xdr_buf *xdr = &rqst->rq_snd_buf;
+	unsigned int count, remaining, offset;
 
-	return rqst->rq_snd_buf.len <= ia->ri_max_inline_write;
+	if (xdr->len > r_xprt->rx_ia.ri_max_inline_write)
+		return false;
+
+	if (xdr->page_len) {
+		remaining = xdr->page_len;
+		offset = xdr->page_base & ~PAGE_MASK;
+		count = 0;
+		while (remaining) {
+			remaining -= min_t(unsigned int,
+					   PAGE_SIZE - offset, remaining);
+			offset = 0;
+			if (++count > r_xprt->rx_ia.ri_max_send_sges)
+				return false;
+		}
+	}
+
+	return true;
 }
 
 /* The client can't know how large the actual reply will be. Thus it
@@ -186,9 +206,9 @@ rpcrdma_convert_kvec(struct kvec *vec, struct rpcrdma_mr_seg *seg, int n)
  */
 
 static int
-rpcrdma_convert_iovs(struct xdr_buf *xdrbuf, unsigned int pos,
-	enum rpcrdma_chunktype type, struct rpcrdma_mr_seg *seg,
-	bool reminv_expected)
+rpcrdma_convert_iovs(struct rpcrdma_xprt *r_xprt, struct xdr_buf *xdrbuf,
+		     unsigned int pos, enum rpcrdma_chunktype type,
+		     struct rpcrdma_mr_seg *seg)
 {
 	int len, n, p, page_base;
 	struct page **ppages;
@@ -226,22 +246,21 @@ rpcrdma_convert_iovs(struct xdr_buf *xdrbuf, unsigned int pos,
 	if (len && n == RPCRDMA_MAX_SEGS)
 		goto out_overflow;
 
-	/* When encoding the read list, the tail is always sent inline */
-	if (type == rpcrdma_readch)
+	/* When encoding a Read chunk, the tail iovec contains an
+	 * XDR pad and may be omitted.
+	 */
+	if (type == rpcrdma_readch && r_xprt->rx_ia.ri_implicit_roundup)
 		return n;
 
-	/* When encoding the Write list, some servers need to see an extra
-	 * segment for odd-length Write chunks. The upper layer provides
-	 * space in the tail iovec for this purpose.
+	/* When encoding a Write chunk, some servers need to see an
+	 * extra segment for non-XDR-aligned Write chunks. The upper
+	 * layer provides space in the tail iovec that may be used
+	 * for this purpose.
 	 */
-	if (type == rpcrdma_writech && reminv_expected)
+	if (type == rpcrdma_writech && r_xprt->rx_ia.ri_implicit_roundup)
 		return n;
 
 	if (xdrbuf->tail[0].iov_len) {
-		/* the rpcrdma protocol allows us to omit any trailing
-		 * xdr pad bytes, saving the server an RDMA operation. */
-		if (xdrbuf->tail[0].iov_len < 4 && xprt_rdma_pad_optimize)
-			return n;
 		n = rpcrdma_convert_kvec(&xdrbuf->tail[0], seg, n);
 		if (n == RPCRDMA_MAX_SEGS)
 			goto out_overflow;
@@ -293,7 +312,8 @@ rpcrdma_encode_read_list(struct rpcrdma_xprt *r_xprt,
 	if (rtype == rpcrdma_areadch)
 		pos = 0;
 	seg = req->rl_segments;
-	nsegs = rpcrdma_convert_iovs(&rqst->rq_snd_buf, pos, rtype, seg, false);
+	nsegs = rpcrdma_convert_iovs(r_xprt, &rqst->rq_snd_buf, pos,
+				     rtype, seg);
 	if (nsegs < 0)
 		return ERR_PTR(nsegs);
 
@@ -355,10 +375,9 @@ rpcrdma_encode_write_list(struct rpcrdma_xprt *r_xprt, struct rpcrdma_req *req,
 	}
 
 	seg = req->rl_segments;
-	nsegs = rpcrdma_convert_iovs(&rqst->rq_rcv_buf,
+	nsegs = rpcrdma_convert_iovs(r_xprt, &rqst->rq_rcv_buf,
 				     rqst->rq_rcv_buf.head[0].iov_len,
-				     wtype, seg,
-				     r_xprt->rx_ia.ri_reminv_expected);
+				     wtype, seg);
 	if (nsegs < 0)
 		return ERR_PTR(nsegs);
 
@@ -423,8 +442,7 @@ rpcrdma_encode_reply_chunk(struct rpcrdma_xprt *r_xprt,
 	}
 
 	seg = req->rl_segments;
-	nsegs = rpcrdma_convert_iovs(&rqst->rq_rcv_buf, 0, wtype, seg,
-				     r_xprt->rx_ia.ri_reminv_expected);
+	nsegs = rpcrdma_convert_iovs(r_xprt, &rqst->rq_rcv_buf, 0, wtype, seg);
 	if (nsegs < 0)
 		return ERR_PTR(nsegs);
 
@@ -786,7 +804,7 @@ rpcrdma_count_chunks(struct rpcrdma_rep *rep, int wrchunk, __be32 **iptrp)
 		ifdebug(FACILITY) {
 			u64 off;
 			xdr_decode_hyper((__be32 *)&seg->rs_offset, &off);
-			dprintk("RPC:       %s: chunk %d@0x%llx:0x%x\n",
+			dprintk("RPC:       %s: chunk %d@0x%016llx:0x%08x\n",
 				__func__,
 				be32_to_cpu(seg->rs_length),
 				(unsigned long long)off,
@@ -906,28 +924,6 @@ rpcrdma_inline_fixup(struct rpc_rqst *rqst, char *srcp, int copy_len, int pad)
 	return fixup_copy_count;
 }
 
-void
-rpcrdma_connect_worker(struct work_struct *work)
-{
-	struct rpcrdma_ep *ep =
-		container_of(work, struct rpcrdma_ep, rep_connect_worker.work);
-	struct rpcrdma_xprt *r_xprt =
-		container_of(ep, struct rpcrdma_xprt, rx_ep);
-	struct rpc_xprt *xprt = &r_xprt->rx_xprt;
-
-	spin_lock_bh(&xprt->transport_lock);
-	if (++xprt->connect_cookie == 0)	/* maintain a reserved value */
-		++xprt->connect_cookie;
-	if (ep->rep_connected > 0) {
-		if (!xprt_test_and_set_connected(xprt))
-			xprt_wake_pending_tasks(xprt, 0);
-	} else {
-		if (xprt_test_and_clear_connected(xprt))
-			xprt_wake_pending_tasks(xprt, -ENOTCONN);
-	}
-	spin_unlock_bh(&xprt->transport_lock);
-}
-
 #if defined(CONFIG_SUNRPC_BACKCHANNEL)
 /* By convention, backchannel calls arrive via rdma_msg type
  * messages, and never populate the chunk lists. This makes
@@ -958,18 +954,6 @@ rpcrdma_is_bcall(struct rpcrdma_msg *headerp)
 	return true;
 }
 #endif	/* CONFIG_SUNRPC_BACKCHANNEL */
-
-/*
- * This function is called when an async event is posted to
- * the connection which changes the connection state. All it
- * does at this point is mark the connection up/down, the rpc
- * timers do the rest.
- */
-void
-rpcrdma_conn_func(struct rpcrdma_ep *ep)
-{
-	schedule_delayed_work(&ep->rep_connect_worker, 0);
-}
 
 /* Process received RPC/RDMA messages.
  *

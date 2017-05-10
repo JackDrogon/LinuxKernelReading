@@ -18,6 +18,7 @@
 
 #include <linux/list.h>
 #include <linux/percpu_ida.h>
+#include <net/ipv6.h>         /* ipv6_addr_equal() */
 #include <scsi/scsi_tcq.h>
 #include <scsi/iscsi_proto.h>
 #include <target/target_core_base.h>
@@ -735,21 +736,23 @@ void iscsit_free_cmd(struct iscsi_cmd *cmd, bool shutdown)
 {
 	struct se_cmd *se_cmd = NULL;
 	int rc;
+	bool op_scsi = false;
 	/*
 	 * Determine if a struct se_cmd is associated with
 	 * this struct iscsi_cmd.
 	 */
 	switch (cmd->iscsi_opcode) {
 	case ISCSI_OP_SCSI_CMD:
-		se_cmd = &cmd->se_cmd;
-		__iscsit_free_cmd(cmd, true, shutdown);
+		op_scsi = true;
 		/*
 		 * Fallthrough
 		 */
 	case ISCSI_OP_SCSI_TMFUNC:
-		rc = transport_generic_free_cmd(&cmd->se_cmd, shutdown);
-		if (!rc && shutdown && se_cmd && se_cmd->se_sess) {
-			__iscsit_free_cmd(cmd, true, shutdown);
+		se_cmd = &cmd->se_cmd;
+		__iscsit_free_cmd(cmd, op_scsi, shutdown);
+		rc = transport_generic_free_cmd(se_cmd, shutdown);
+		if (!rc && shutdown && se_cmd->se_sess) {
+			__iscsit_free_cmd(cmd, op_scsi, shutdown);
 			target_put_sess_cmd(se_cmd);
 		}
 		break;

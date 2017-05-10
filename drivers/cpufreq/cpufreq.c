@@ -680,9 +680,11 @@ static ssize_t show_cpuinfo_cur_freq(struct cpufreq_policy *policy,
 					char *buf)
 {
 	unsigned int cur_freq = __cpufreq_get(policy);
-	if (!cur_freq)
-		return sprintf(buf, "<unknown>");
-	return sprintf(buf, "%u\n", cur_freq);
+
+	if (cur_freq)
+		return sprintf(buf, "%u\n", cur_freq);
+
+	return sprintf(buf, "<unknown>\n");
 }
 
 /**
@@ -1188,6 +1190,9 @@ static int cpufreq_online(unsigned int cpu)
 		for_each_cpu(j, policy->related_cpus)
 			per_cpu(cpufreq_cpu_data, j) = policy;
 		write_unlock_irqrestore(&cpufreq_driver_lock, flags);
+	} else {
+		policy->min = policy->user_policy.min;
+		policy->max = policy->user_policy.max;
 	}
 
 	if (cpufreq_driver->get && !cpufreq_driver->setpolicy) {
@@ -1526,7 +1531,10 @@ unsigned int cpufreq_get(unsigned int cpu)
 
 	if (policy) {
 		down_read(&policy->rwsem);
-		ret_freq = __cpufreq_get(policy);
+
+		if (!policy_is_inactive(policy))
+			ret_freq = __cpufreq_get(policy);
+
 		up_read(&policy->rwsem);
 
 		cpufreq_cpu_put(policy);
@@ -2254,16 +2262,18 @@ static int cpufreq_set_policy(struct cpufreq_policy *policy,
  *	Useful for policy notifiers which have different necessities
  *	at different times.
  */
-int cpufreq_update_policy(unsigned int cpu)
+void cpufreq_update_policy(unsigned int cpu)
 {
 	struct cpufreq_policy *policy = cpufreq_cpu_get(cpu);
 	struct cpufreq_policy new_policy;
-	int ret;
 
 	if (!policy)
-		return -ENODEV;
+		return;
 
 	down_write(&policy->rwsem);
+
+	if (policy_is_inactive(policy))
+		goto unlock;
 
 	pr_debug("updating policy for CPU %u\n", cpu);
 	memcpy(&new_policy, policy, sizeof(*policy));
@@ -2275,24 +2285,20 @@ int cpufreq_update_policy(unsigned int cpu)
 	 * -> ask driver for current freq and notify governors about a change
 	 */
 	if (cpufreq_driver->get && !cpufreq_driver->setpolicy) {
-		if (cpufreq_suspended) {
-			ret = -EAGAIN;
+		if (cpufreq_suspended)
 			goto unlock;
-		}
+
 		new_policy.cur = cpufreq_update_current_freq(policy);
-		if (WARN_ON(!new_policy.cur)) {
-			ret = -EIO;
+		if (WARN_ON(!new_policy.cur))
 			goto unlock;
-		}
 	}
 
-	ret = cpufreq_set_policy(policy, &new_policy);
+	cpufreq_set_policy(policy, &new_policy);
 
 unlock:
 	up_write(&policy->rwsem);
 
 	cpufreq_cpu_put(policy);
-	return ret;
 }
 EXPORT_SYMBOL(cpufreq_update_policy);
 
@@ -2399,6 +2405,20 @@ EXPORT_SYMBOL_GPL(cpufreq_boost_enabled);
  *********************************************************************/
 static enum cpuhp_state hp_online;
 
+static int cpuhp_cpufreq_online(unsigned int cpu)
+{
+	cpufreq_online(cpu);
+
+	return 0;
+}
+
+static int cpuhp_cpufreq_offline(unsigned int cpu)
+{
+	cpufreq_offline(cpu);
+
+	return 0;
+}
+
 /**
  * cpufreq_register_driver - register a CPU Frequency driver
  * @driver_data: A struct cpufreq_driver containing the values#
@@ -2461,8 +2481,8 @@ int cpufreq_register_driver(struct cpufreq_driver *driver_data)
 	}
 
 	ret = cpuhp_setup_state_nocalls(CPUHP_AP_ONLINE_DYN, "cpufreq:online",
-					cpufreq_online,
-					cpufreq_offline);
+					cpuhp_cpufreq_online,
+					cpuhp_cpufreq_offline);
 	if (ret < 0)
 		goto err_if_unreg;
 	hp_online = ret;

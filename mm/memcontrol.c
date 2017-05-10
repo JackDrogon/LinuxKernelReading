@@ -68,7 +68,7 @@
 #include <net/ip.h>
 #include "slab.h"
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <trace/events/vmscan.h>
 
@@ -1814,22 +1814,13 @@ static void drain_all_stock(struct mem_cgroup *root_memcg)
 	mutex_unlock(&percpu_charge_mutex);
 }
 
-static int memcg_cpu_hotplug_callback(struct notifier_block *nb,
-					unsigned long action,
-					void *hcpu)
+static int memcg_hotplug_cpu_dead(unsigned int cpu)
 {
-	int cpu = (unsigned long)hcpu;
 	struct memcg_stock_pcp *stock;
-
-	if (action == CPU_ONLINE)
-		return NOTIFY_OK;
-
-	if (action != CPU_DEAD && action != CPU_DEAD_FROZEN)
-		return NOTIFY_OK;
 
 	stock = &per_cpu(memcg_stock, cpu);
 	drain_stock(stock);
-	return NOTIFY_OK;
+	return 0;
 }
 
 static void reclaim_high(struct mem_cgroup *memcg,
@@ -2152,6 +2143,8 @@ struct memcg_kmem_cache_create_work {
 	struct work_struct work;
 };
 
+static struct workqueue_struct *memcg_kmem_cache_create_wq;
+
 static void memcg_kmem_cache_create_func(struct work_struct *w)
 {
 	struct memcg_kmem_cache_create_work *cw =
@@ -2183,7 +2176,7 @@ static void __memcg_schedule_kmem_cache_create(struct mem_cgroup *memcg,
 	cw->cachep = cachep;
 	INIT_WORK(&cw->work, memcg_kmem_cache_create_func);
 
-	schedule_work(&cw->work);
+	queue_work(memcg_kmem_cache_create_wq, &cw->work);
 }
 
 static void memcg_schedule_kmem_cache_create(struct mem_cgroup *memcg,
@@ -4139,15 +4132,20 @@ static void free_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
 	kfree(memcg->nodeinfo[node]);
 }
 
-static void mem_cgroup_free(struct mem_cgroup *memcg)
+static void __mem_cgroup_free(struct mem_cgroup *memcg)
 {
 	int node;
 
-	memcg_wb_domain_exit(memcg);
 	for_each_node(node)
 		free_mem_cgroup_per_node_info(memcg, node);
 	free_percpu(memcg->stat);
 	kfree(memcg);
+}
+
+static void mem_cgroup_free(struct mem_cgroup *memcg)
+{
+	memcg_wb_domain_exit(memcg);
+	__mem_cgroup_free(memcg);
 }
 
 static struct mem_cgroup *mem_cgroup_alloc(void)
@@ -4200,7 +4198,7 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
 fail:
 	if (memcg->id.id > 0)
 		idr_remove(&mem_cgroup_idr, memcg->id.id);
-	mem_cgroup_free(memcg);
+	__mem_cgroup_free(memcg);
 	return NULL;
 }
 
@@ -4360,9 +4358,9 @@ static int mem_cgroup_do_precharge(unsigned long count)
 		return ret;
 	}
 
-	/* Try charges one by one with reclaim */
+	/* Try charges one by one with reclaim, but do not retry */
 	while (count--) {
-		ret = try_charge(mc.to, GFP_KERNEL & ~__GFP_NORETRY, 1);
+		ret = try_charge(mc.to, GFP_KERNEL | __GFP_NORETRY, 1);
 		if (ret)
 			return ret;
 		mc.precharge++;
@@ -5772,16 +5770,28 @@ __setup("cgroup.memory=", cgroup_memory);
 /*
  * subsys_initcall() for memory controller.
  *
- * Some parts like hotcpu_notifier() have to be initialized from this context
- * because of lock dependencies (cgroup_lock -> cpu hotplug) but basically
- * everything that doesn't depend on a specific mem_cgroup structure should
- * be initialized from here.
+ * Some parts like memcg_hotplug_cpu_dead() have to be initialized from this
+ * context because of lock dependencies (cgroup_lock -> cpu hotplug) but
+ * basically everything that doesn't depend on a specific mem_cgroup structure
+ * should be initialized from here.
  */
 static int __init mem_cgroup_init(void)
 {
 	int cpu, node;
 
-	hotcpu_notifier(memcg_cpu_hotplug_callback, 0);
+#ifndef CONFIG_SLOB
+	/*
+	 * Kmem cache creation is mostly done with the slab_mutex held,
+	 * so use a special workqueue to avoid stalling all worker
+	 * threads in case lots of cgroups are created simultaneously.
+	 */
+	memcg_kmem_cache_create_wq =
+		alloc_ordered_workqueue("memcg_kmem_cache_create", 0);
+	BUG_ON(!memcg_kmem_cache_create_wq);
+#endif
+
+	cpuhp_setup_state_nocalls(CPUHP_MM_MEMCQ_DEAD, "mm/memctrl:dead", NULL,
+				  memcg_hotplug_cpu_dead);
 
 	for_each_possible_cpu(cpu)
 		INIT_WORK(&per_cpu_ptr(&memcg_stock, cpu)->work,

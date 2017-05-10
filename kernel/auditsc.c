@@ -446,6 +446,7 @@ static int audit_filter_rules(struct task_struct *tsk,
 	const struct cred *cred;
 	int i, need_sid = 1;
 	u32 sid;
+	unsigned int sessionid;
 
 	cred = rcu_dereference_check(tsk->cred, tsk == current || task_creation);
 
@@ -507,6 +508,10 @@ static int audit_filter_rules(struct task_struct *tsk,
 			break;
 		case AUDIT_FSGID:
 			result = audit_gid_comparator(cred->fsgid, f->op, f->gid);
+			break;
+		case AUDIT_SESSIONID:
+			sessionid = audit_get_sessionid(current);
+			result = audit_comparator(sessionid, f->op, f->val);
 			break;
 		case AUDIT_PERS:
 			result = audit_comparator(tsk->personality, f->op, f->val);
@@ -757,7 +762,7 @@ static enum audit_state audit_filter_syscall(struct task_struct *tsk,
 	struct audit_entry *e;
 	enum audit_state state;
 
-	if (audit_pid && tsk->tgid == audit_pid)
+	if (auditd_test_task(tsk))
 		return AUDIT_DISABLED;
 
 	rcu_read_lock();
@@ -811,7 +816,7 @@ void audit_filter_inodes(struct task_struct *tsk, struct audit_context *ctx)
 {
 	struct audit_names *n;
 
-	if (audit_pid && tsk->tgid == audit_pid)
+	if (auditd_test_task(tsk))
 		return;
 
 	rcu_read_lock();
@@ -1000,7 +1005,7 @@ static void audit_log_execve_info(struct audit_context *context,
 	long len_rem;
 	long len_full;
 	long len_buf;
-	long len_abuf;
+	long len_abuf = 0;
 	long len_tmp;
 	bool require_data;
 	bool encode;
@@ -2025,8 +2030,11 @@ int audit_set_loginuid(kuid_t loginuid)
 		goto out;
 
 	/* are we setting or clearing? */
-	if (uid_valid(loginuid))
+	if (uid_valid(loginuid)) {
 		sessionid = (unsigned int)atomic_inc_return(&session_id);
+		if (unlikely(sessionid == (unsigned int)-1))
+			sessionid = (unsigned int)atomic_inc_return(&session_id);
+	}
 
 	task->sessionid = sessionid;
 	task->loginuid = loginuid;
@@ -2243,7 +2251,7 @@ int __audit_signal_info(int sig, struct task_struct *t)
 	struct audit_context *ctx = tsk->audit_context;
 	kuid_t uid = current_uid(), t_uid = task_uid(t);
 
-	if (audit_pid && t->tgid == audit_pid) {
+	if (auditd_test_task(t)) {
 		if (sig == SIGTERM || sig == SIGHUP || sig == SIGUSR1 || sig == SIGUSR2) {
 			audit_sig_pid = task_tgid_nr(tsk);
 			if (uid_valid(tsk->loginuid))

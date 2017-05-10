@@ -248,7 +248,7 @@ struct cache {
 	/*
 	 * Fields for converting from sectors to blocks.
 	 */
-	uint32_t sectors_per_block;
+	sector_t sectors_per_block;
 	int sectors_per_block_shift;
 
 	spinlock_t lock;
@@ -989,7 +989,8 @@ static void set_cache_mode(struct cache *cache, enum cache_metadata_mode new_mod
 	enum cache_metadata_mode old_mode = get_cache_mode(cache);
 
 	if (dm_cache_metadata_needs_check(cache->cmd, &needs_check)) {
-		DMERR("unable to read needs_check flag, setting failure mode");
+		DMERR("%s: unable to read needs_check flag, setting failure mode.",
+		      cache_device_name(cache));
 		new_mode = CM_FAIL;
 	}
 
@@ -3546,11 +3547,11 @@ static void cache_status(struct dm_target *ti, status_type_t type,
 
 		residency = policy_residency(cache->policy);
 
-		DMEMIT("%u %llu/%llu %u %llu/%llu %u %u %u %u %u %u %lu ",
+		DMEMIT("%u %llu/%llu %llu %llu/%llu %u %u %u %u %u %u %lu ",
 		       (unsigned)DM_CACHE_METADATA_BLOCK_SIZE,
 		       (unsigned long long)(nr_blocks_metadata - nr_free_blocks_metadata),
 		       (unsigned long long)nr_blocks_metadata,
-		       cache->sectors_per_block,
+		       (unsigned long long)cache->sectors_per_block,
 		       (unsigned long long) from_cblock(residency),
 		       (unsigned long long) from_cblock(cache->cache_size),
 		       (unsigned) atomic_read(&cache->stats.read_hit),

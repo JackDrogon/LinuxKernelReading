@@ -35,7 +35,7 @@
 #include <asm/oplib.h>
 #include <asm/iommu.h>
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/mmu_context.h>
 #include <asm/tlbflush.h>
 #include <asm/dma.h>
@@ -1495,7 +1495,7 @@ bool kern_addr_valid(unsigned long addr)
 	if ((long)addr < 0L) {
 		unsigned long pa = __pa(addr);
 
-		if ((addr >> max_phys_bits) != 0UL)
+		if ((pa >> max_phys_bits) != 0UL)
 			return false;
 
 		return pfn_valid(pa >> PAGE_SHIFT);

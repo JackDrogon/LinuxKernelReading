@@ -29,6 +29,7 @@
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/freezer.h>
+#include <linux/pm_runtime.h>
 
 #include "tpm.h"
 #include "tpm_eventlog.h"
@@ -356,6 +357,9 @@ ssize_t tpm_transmit(struct tpm_chip *chip, const u8 *buf, size_t bufsiz,
 	if (!(flags & TPM_TRANSMIT_UNLOCKED))
 		mutex_lock(&chip->tpm_mutex);
 
+	if (chip->dev.parent)
+		pm_runtime_get_sync(chip->dev.parent);
+
 	rc = chip->ops->send(chip, (u8 *) buf, count);
 	if (rc < 0) {
 		dev_err(&chip->dev,
@@ -397,6 +401,9 @@ out_recv:
 		dev_err(&chip->dev,
 			"tpm_transmit: tpm_recv: error %zd\n", rc);
 out:
+	if (chip->dev.parent)
+		pm_runtime_put_sync(chip->dev.parent);
+
 	if (!(flags & TPM_TRANSMIT_UNLOCKED))
 		mutex_unlock(&chip->tpm_mutex);
 	return rc;
@@ -437,26 +444,29 @@ static const struct tpm_input_header tpm_getcap_header = {
 	.ordinal = TPM_ORD_GET_CAP
 };
 
-ssize_t tpm_getcap(struct tpm_chip *chip, __be32 subcap_id, cap_t *cap,
+ssize_t tpm_getcap(struct tpm_chip *chip, u32 subcap_id, cap_t *cap,
 		   const char *desc)
 {
 	struct tpm_cmd_t tpm_cmd;
 	int rc;
 
 	tpm_cmd.header.in = tpm_getcap_header;
-	if (subcap_id == CAP_VERSION_1_1 || subcap_id == CAP_VERSION_1_2) {
-		tpm_cmd.params.getcap_in.cap = subcap_id;
+	if (subcap_id == TPM_CAP_VERSION_1_1 ||
+	    subcap_id == TPM_CAP_VERSION_1_2) {
+		tpm_cmd.params.getcap_in.cap = cpu_to_be32(subcap_id);
 		/*subcap field not necessary */
 		tpm_cmd.params.getcap_in.subcap_size = cpu_to_be32(0);
 		tpm_cmd.header.in.length -= cpu_to_be32(sizeof(__be32));
 	} else {
 		if (subcap_id == TPM_CAP_FLAG_PERM ||
 		    subcap_id == TPM_CAP_FLAG_VOL)
-			tpm_cmd.params.getcap_in.cap = TPM_CAP_FLAG;
+			tpm_cmd.params.getcap_in.cap =
+				cpu_to_be32(TPM_CAP_FLAG);
 		else
-			tpm_cmd.params.getcap_in.cap = TPM_CAP_PROP;
+			tpm_cmd.params.getcap_in.cap =
+				cpu_to_be32(TPM_CAP_PROP);
 		tpm_cmd.params.getcap_in.subcap_size = cpu_to_be32(4);
-		tpm_cmd.params.getcap_in.subcap = subcap_id;
+		tpm_cmd.params.getcap_in.subcap = cpu_to_be32(subcap_id);
 	}
 	rc = tpm_transmit_cmd(chip, &tpm_cmd, TPM_INTERNAL_RESULT_SIZE, 0,
 			      desc);
@@ -488,11 +498,12 @@ static int tpm_startup(struct tpm_chip *chip, __be16 startup_type)
 
 int tpm_get_timeouts(struct tpm_chip *chip)
 {
-	struct tpm_cmd_t tpm_cmd;
-	unsigned long new_timeout[4];
-	unsigned long old_timeout[4];
-	struct duration_t *duration_cap;
+	cap_t cap;
+	unsigned long timeout_old[4], timeout_chip[4], timeout_eff[4];
 	ssize_t rc;
+
+	if (chip->flags & TPM_CHIP_FLAG_HAVE_TIMEOUTS)
+		return 0;
 
 	if (chip->flags & TPM_CHIP_FLAG_TPM2) {
 		/* Fixed timeouts for TPM2 */
@@ -506,47 +517,35 @@ int tpm_get_timeouts(struct tpm_chip *chip)
 		    msecs_to_jiffies(TPM2_DURATION_MEDIUM);
 		chip->duration[TPM_LONG] =
 		    msecs_to_jiffies(TPM2_DURATION_LONG);
+
+		chip->flags |= TPM_CHIP_FLAG_HAVE_TIMEOUTS;
 		return 0;
 	}
 
-	tpm_cmd.header.in = tpm_getcap_header;
-	tpm_cmd.params.getcap_in.cap = TPM_CAP_PROP;
-	tpm_cmd.params.getcap_in.subcap_size = cpu_to_be32(4);
-	tpm_cmd.params.getcap_in.subcap = TPM_CAP_PROP_TIS_TIMEOUT;
-	rc = tpm_transmit_cmd(chip, &tpm_cmd, TPM_INTERNAL_RESULT_SIZE, 0,
-			      NULL);
-
+	rc = tpm_getcap(chip, TPM_CAP_PROP_TIS_TIMEOUT, &cap,
+			"attempting to determine the timeouts");
 	if (rc == TPM_ERR_INVALID_POSTINIT) {
 		/* The TPM is not started, we are the first to talk to it.
 		   Execute a startup command. */
-		dev_info(&chip->dev, "Issuing TPM_STARTUP");
+		dev_info(&chip->dev, "Issuing TPM_STARTUP\n");
 		if (tpm_startup(chip, TPM_ST_CLEAR))
 			return rc;
 
-		tpm_cmd.header.in = tpm_getcap_header;
-		tpm_cmd.params.getcap_in.cap = TPM_CAP_PROP;
-		tpm_cmd.params.getcap_in.subcap_size = cpu_to_be32(4);
-		tpm_cmd.params.getcap_in.subcap = TPM_CAP_PROP_TIS_TIMEOUT;
-		rc = tpm_transmit_cmd(chip, &tpm_cmd, TPM_INTERNAL_RESULT_SIZE,
-				      0, NULL);
+		rc = tpm_getcap(chip, TPM_CAP_PROP_TIS_TIMEOUT, &cap,
+				"attempting to determine the timeouts");
 	}
-	if (rc) {
-		dev_err(&chip->dev,
-			"A TPM error (%zd) occurred attempting to determine the timeouts\n",
-			rc);
-		goto duration;
-	}
+	if (rc)
+		return rc;
 
-	if (be32_to_cpu(tpm_cmd.header.out.return_code) != 0 ||
-	    be32_to_cpu(tpm_cmd.header.out.length)
-	    != sizeof(tpm_cmd.header.out) + sizeof(u32) + 4 * sizeof(u32))
-		return -EINVAL;
-
-	old_timeout[0] = be32_to_cpu(tpm_cmd.params.getcap_out.cap.timeout.a);
-	old_timeout[1] = be32_to_cpu(tpm_cmd.params.getcap_out.cap.timeout.b);
-	old_timeout[2] = be32_to_cpu(tpm_cmd.params.getcap_out.cap.timeout.c);
-	old_timeout[3] = be32_to_cpu(tpm_cmd.params.getcap_out.cap.timeout.d);
-	memcpy(new_timeout, old_timeout, sizeof(new_timeout));
+	timeout_old[0] = jiffies_to_usecs(chip->timeout_a);
+	timeout_old[1] = jiffies_to_usecs(chip->timeout_b);
+	timeout_old[2] = jiffies_to_usecs(chip->timeout_c);
+	timeout_old[3] = jiffies_to_usecs(chip->timeout_d);
+	timeout_chip[0] = be32_to_cpu(cap.timeout.a);
+	timeout_chip[1] = be32_to_cpu(cap.timeout.b);
+	timeout_chip[2] = be32_to_cpu(cap.timeout.c);
+	timeout_chip[3] = be32_to_cpu(cap.timeout.d);
+	memcpy(timeout_eff, timeout_chip, sizeof(timeout_eff));
 
 	/*
 	 * Provide ability for vendor overrides of timeout values in case
@@ -554,16 +553,24 @@ int tpm_get_timeouts(struct tpm_chip *chip)
 	 */
 	if (chip->ops->update_timeouts != NULL)
 		chip->timeout_adjusted =
-			chip->ops->update_timeouts(chip, new_timeout);
+			chip->ops->update_timeouts(chip, timeout_eff);
 
 	if (!chip->timeout_adjusted) {
-		/* Don't overwrite default if value is 0 */
-		if (new_timeout[0] != 0 && new_timeout[0] < 1000) {
-			int i;
+		/* Restore default if chip reported 0 */
+		int i;
 
+		for (i = 0; i < ARRAY_SIZE(timeout_eff); i++) {
+			if (timeout_eff[i])
+				continue;
+
+			timeout_eff[i] = timeout_old[i];
+			chip->timeout_adjusted = true;
+		}
+
+		if (timeout_eff[0] != 0 && timeout_eff[0] < 1000) {
 			/* timeouts in msec rather usec */
-			for (i = 0; i != ARRAY_SIZE(new_timeout); i++)
-				new_timeout[i] *= 1000;
+			for (i = 0; i != ARRAY_SIZE(timeout_eff); i++)
+				timeout_eff[i] *= 1000;
 			chip->timeout_adjusted = true;
 		}
 	}
@@ -572,40 +579,28 @@ int tpm_get_timeouts(struct tpm_chip *chip)
 	if (chip->timeout_adjusted) {
 		dev_info(&chip->dev,
 			 HW_ERR "Adjusting reported timeouts: A %lu->%luus B %lu->%luus C %lu->%luus D %lu->%luus\n",
-			 old_timeout[0], new_timeout[0],
-			 old_timeout[1], new_timeout[1],
-			 old_timeout[2], new_timeout[2],
-			 old_timeout[3], new_timeout[3]);
+			 timeout_chip[0], timeout_eff[0],
+			 timeout_chip[1], timeout_eff[1],
+			 timeout_chip[2], timeout_eff[2],
+			 timeout_chip[3], timeout_eff[3]);
 	}
 
-	chip->timeout_a = usecs_to_jiffies(new_timeout[0]);
-	chip->timeout_b = usecs_to_jiffies(new_timeout[1]);
-	chip->timeout_c = usecs_to_jiffies(new_timeout[2]);
-	chip->timeout_d = usecs_to_jiffies(new_timeout[3]);
+	chip->timeout_a = usecs_to_jiffies(timeout_eff[0]);
+	chip->timeout_b = usecs_to_jiffies(timeout_eff[1]);
+	chip->timeout_c = usecs_to_jiffies(timeout_eff[2]);
+	chip->timeout_d = usecs_to_jiffies(timeout_eff[3]);
 
-duration:
-	tpm_cmd.header.in = tpm_getcap_header;
-	tpm_cmd.params.getcap_in.cap = TPM_CAP_PROP;
-	tpm_cmd.params.getcap_in.subcap_size = cpu_to_be32(4);
-	tpm_cmd.params.getcap_in.subcap = TPM_CAP_PROP_TIS_DURATION;
-
-	rc = tpm_transmit_cmd(chip, &tpm_cmd, TPM_INTERNAL_RESULT_SIZE, 0,
-			      "attempting to determine the durations");
+	rc = tpm_getcap(chip, TPM_CAP_PROP_TIS_DURATION, &cap,
+			"attempting to determine the durations");
 	if (rc)
 		return rc;
 
-	if (be32_to_cpu(tpm_cmd.header.out.return_code) != 0 ||
-	    be32_to_cpu(tpm_cmd.header.out.length)
-	    != sizeof(tpm_cmd.header.out) + sizeof(u32) + 3 * sizeof(u32))
-		return -EINVAL;
-
-	duration_cap = &tpm_cmd.params.getcap_out.cap.duration;
 	chip->duration[TPM_SHORT] =
-	    usecs_to_jiffies(be32_to_cpu(duration_cap->tpm_short));
+		usecs_to_jiffies(be32_to_cpu(cap.duration.tpm_short));
 	chip->duration[TPM_MEDIUM] =
-	    usecs_to_jiffies(be32_to_cpu(duration_cap->tpm_medium));
+		usecs_to_jiffies(be32_to_cpu(cap.duration.tpm_medium));
 	chip->duration[TPM_LONG] =
-	    usecs_to_jiffies(be32_to_cpu(duration_cap->tpm_long));
+		usecs_to_jiffies(be32_to_cpu(cap.duration.tpm_long));
 
 	/* The Broadcom BCM0102 chipset in a Dell Latitude D820 gets the above
 	 * value wrong and apparently reports msecs rather than usecs. So we
@@ -619,6 +614,8 @@ duration:
 		chip->duration_adjusted = true;
 		dev_info(&chip->dev, "Adjusting TPM timeout parameters.");
 	}
+
+	chip->flags |= TPM_CHIP_FLAG_HAVE_TIMEOUTS;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(tpm_get_timeouts);
@@ -726,6 +723,14 @@ int tpm_pcr_read(u32 chip_num, int pcr_idx, u8 *res_buf)
 }
 EXPORT_SYMBOL_GPL(tpm_pcr_read);
 
+#define TPM_ORD_PCR_EXTEND cpu_to_be32(20)
+#define EXTEND_PCR_RESULT_SIZE 34
+static const struct tpm_input_header pcrextend_header = {
+	.tag = TPM_TAG_RQU_COMMAND,
+	.length = cpu_to_be32(34),
+	.ordinal = TPM_ORD_PCR_EXTEND
+};
+
 /**
  * tpm_pcr_extend - extend pcr value with hash
  * @chip_num:	tpm idx # or AN&
@@ -736,14 +741,6 @@ EXPORT_SYMBOL_GPL(tpm_pcr_read);
  * isn't, protect against the chip disappearing, by incrementing
  * the module usage count.
  */
-#define TPM_ORD_PCR_EXTEND cpu_to_be32(20)
-#define EXTEND_PCR_RESULT_SIZE 34
-static const struct tpm_input_header pcrextend_header = {
-	.tag = TPM_TAG_RQU_COMMAND,
-	.length = cpu_to_be32(34),
-	.ordinal = TPM_ORD_PCR_EXTEND
-};
-
 int tpm_pcr_extend(u32 chip_num, int pcr_idx, const u8 *hash)
 {
 	struct tpm_cmd_t cmd;

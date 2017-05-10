@@ -288,12 +288,13 @@ static int parse_reply_info_extra(void **p, void *end,
 				  struct ceph_mds_reply_info_parsed *info,
 				  u64 features)
 {
-	if (info->head->op == CEPH_MDS_OP_GETFILELOCK)
+	u32 op = le32_to_cpu(info->head->op);
+
+	if (op == CEPH_MDS_OP_GETFILELOCK)
 		return parse_reply_info_filelock(p, end, info, features);
-	else if (info->head->op == CEPH_MDS_OP_READDIR ||
-		 info->head->op == CEPH_MDS_OP_LSSNAP)
+	else if (op == CEPH_MDS_OP_READDIR || op == CEPH_MDS_OP_LSSNAP)
 		return parse_reply_info_dir(p, end, info, features);
-	else if (info->head->op == CEPH_MDS_OP_CREATE)
+	else if (op == CEPH_MDS_OP_CREATE)
 		return parse_reply_info_create(p, end, info, features);
 	else
 		return -EIO;
@@ -626,6 +627,9 @@ static void __unregister_request(struct ceph_mds_client *mdsc,
 				 struct ceph_mds_request *req)
 {
 	dout("__unregister_request %p tid %lld\n", req, req->r_tid);
+
+	/* Never leave an unregistered request on an unsafe list! */
+	list_del_init(&req->r_unsafe_item);
 
 	if (req->r_tid == mdsc->oldest_tid) {
 		struct rb_node *p = rb_next(&req->r_node);
@@ -1035,7 +1039,6 @@ static void cleanup_session_requests(struct ceph_mds_client *mdsc,
 	while (!list_empty(&session->s_unsafe)) {
 		req = list_first_entry(&session->s_unsafe,
 				       struct ceph_mds_request, r_unsafe_item);
-		list_del_init(&req->r_unsafe_item);
 		pr_warn_ratelimited(" dropping unsafe request %llu\n",
 				    req->r_tid);
 		__unregister_request(mdsc, req);
@@ -2100,17 +2103,31 @@ static int __do_request(struct ceph_mds_client *mdsc,
 		err = -EIO;
 		goto finish;
 	}
+	if (ACCESS_ONCE(mdsc->fsc->mount_state) == CEPH_MOUNT_MOUNTING) {
+		if (mdsc->mdsmap_err) {
+			err = mdsc->mdsmap_err;
+			dout("do_request mdsmap err %d\n", err);
+			goto finish;
+		}
+		if (mdsc->mdsmap->m_epoch == 0) {
+			dout("do_request no mdsmap, waiting for map\n");
+			list_add(&req->r_wait, &mdsc->waiting_for_map);
+			goto finish;
+		}
+		if (!(mdsc->fsc->mount_options->flags &
+		      CEPH_MOUNT_OPT_MOUNTWAIT) &&
+		    !ceph_mdsmap_is_cluster_available(mdsc->mdsmap)) {
+			err = -ENOENT;
+			pr_info("probably no mds server is up\n");
+			goto finish;
+		}
+	}
 
 	put_request_session(req);
 
 	mds = __choose_mds(mdsc, req);
 	if (mds < 0 ||
 	    ceph_mdsmap_get_state(mdsc->mdsmap, mds) < CEPH_MDS_STATE_ACTIVE) {
-		if (mdsc->mdsmap_err) {
-			err = mdsc->mdsmap_err;
-			dout("do_request mdsmap err %d\n", err);
-			goto finish;
-		}
 		dout("do_request no mds or not active, waiting for map\n");
 		list_add(&req->r_wait, &mdsc->waiting_for_map);
 		goto out;
@@ -2422,7 +2439,6 @@ static void handle_reply(struct ceph_mds_session *session, struct ceph_msg *msg)
 			 * useful we could do with a revised return value.
 			 */
 			dout("got safe reply %llu, mds%d\n", tid, mds);
-			list_del_init(&req->r_unsafe_item);
 
 			/* last unsafe request during umount? */
 			if (mdsc->stopping && !__get_oldest_req(mdsc))
@@ -3943,13 +3959,13 @@ static struct ceph_auth_handshake *get_authorizer(struct ceph_connection *con,
 }
 
 
-static int verify_authorizer_reply(struct ceph_connection *con, int len)
+static int verify_authorizer_reply(struct ceph_connection *con)
 {
 	struct ceph_mds_session *s = con->private;
 	struct ceph_mds_client *mdsc = s->s_mdsc;
 	struct ceph_auth_client *ac = mdsc->fsc->client->monc.auth;
 
-	return ceph_auth_verify_authorizer_reply(ac, s->s_auth.authorizer, len);
+	return ceph_auth_verify_authorizer_reply(ac, s->s_auth.authorizer);
 }
 
 static int invalidate_authorizer(struct ceph_connection *con)

@@ -135,9 +135,9 @@ u64 hv_do_hypercall(u64 control, void *input, void *output)
 EXPORT_SYMBOL_GPL(hv_do_hypercall);
 
 #ifdef CONFIG_X86_64
-static cycle_t read_hv_clock_tsc(struct clocksource *arg)
+static u64 read_hv_clock_tsc(struct clocksource *arg)
 {
-	cycle_t current_tick;
+	u64 current_tick;
 	struct ms_hyperv_tsc_page *tsc_pg = hv_context.tsc_page;
 
 	if (tsc_pg->tsc_sequence != 0) {
@@ -146,7 +146,7 @@ static cycle_t read_hv_clock_tsc(struct clocksource *arg)
 		 */
 
 		while (1) {
-			cycle_t tmp;
+			u64 tmp;
 			u32 sequence = tsc_pg->tsc_sequence;
 			u64 cur_tsc;
 			u64 scale = tsc_pg->tsc_scale;
@@ -220,7 +220,7 @@ int hv_init(void)
 	/* See if the hypercall page is already set */
 	rdmsrl(HV_X64_MSR_HYPERCALL, hypercall_msr.as_uint64);
 
-	virtaddr = __vmalloc(PAGE_SIZE, GFP_KERNEL, PAGE_KERNEL_EXEC);
+	virtaddr = __vmalloc(PAGE_SIZE, GFP_KERNEL, PAGE_KERNEL_RX);
 
 	if (!virtaddr)
 		goto cleanup;
@@ -309,9 +309,10 @@ void hv_cleanup(bool crash)
 
 		hypercall_msr.as_uint64 = 0;
 		wrmsrl(HV_X64_MSR_REFERENCE_TSC, hypercall_msr.as_uint64);
-		if (!crash)
+		if (!crash) {
 			vfree(hv_context.tsc_page);
-		hv_context.tsc_page = NULL;
+			hv_context.tsc_page = NULL;
+		}
 	}
 #endif
 }
@@ -350,7 +351,7 @@ int hv_post_message(union hv_connection_id connection_id,
 static int hv_ce_set_next_event(unsigned long delta,
 				struct clock_event_device *evt)
 {
-	cycle_t current_tick;
+	u64 current_tick;
 
 	WARN_ON(!clockevent_state_oneshot(evt));
 
@@ -411,7 +412,7 @@ int hv_synic_alloc(void)
 		goto err;
 	}
 
-	for_each_online_cpu(cpu) {
+	for_each_present_cpu(cpu) {
 		hv_context.event_dpc[cpu] = kmalloc(size, GFP_ATOMIC);
 		if (hv_context.event_dpc[cpu] == NULL) {
 			pr_err("Unable to allocate event dpc\n");
@@ -457,6 +458,8 @@ int hv_synic_alloc(void)
 			pr_err("Unable to allocate post msg page\n");
 			goto err;
 		}
+
+		INIT_LIST_HEAD(&hv_context.percpu_list[cpu]);
 	}
 
 	return 0;
@@ -482,7 +485,7 @@ void hv_synic_free(void)
 	int cpu;
 
 	kfree(hv_context.hv_numa_map);
-	for_each_online_cpu(cpu)
+	for_each_present_cpu(cpu)
 		hv_synic_free_cpu(cpu);
 }
 
@@ -552,8 +555,6 @@ void hv_synic_init(void *arg)
 	rdmsrl(HV_X64_MSR_VP_INDEX, vp_index);
 	hv_context.vp_index[cpu] = (u32)vp_index;
 
-	INIT_LIST_HEAD(&hv_context.percpu_list[cpu]);
-
 	/*
 	 * Register the per-cpu clockevent source.
 	 */
@@ -575,7 +576,7 @@ void hv_synic_clockevents_cleanup(void)
 	if (!(ms_hyperv.features & HV_X64_MSR_SYNTIMER_AVAILABLE))
 		return;
 
-	for_each_online_cpu(cpu)
+	for_each_present_cpu(cpu)
 		clockevents_unbind_device(hv_context.clk_evt[cpu], cpu);
 }
 
@@ -594,8 +595,10 @@ void hv_synic_cleanup(void *arg)
 		return;
 
 	/* Turn off clockevent device */
-	if (ms_hyperv.features & HV_X64_MSR_SYNTIMER_AVAILABLE)
+	if (ms_hyperv.features & HV_X64_MSR_SYNTIMER_AVAILABLE) {
+		clockevents_unbind_device(hv_context.clk_evt[cpu], cpu);
 		hv_ce_shutdown(hv_context.clk_evt[cpu]);
+	}
 
 	rdmsrl(HV_X64_MSR_SINT0 + VMBUS_MESSAGE_SINT, shared_sint.as_uint64);
 

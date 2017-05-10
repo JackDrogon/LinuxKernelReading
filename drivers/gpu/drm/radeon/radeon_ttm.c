@@ -213,8 +213,8 @@ static void radeon_evict_flags(struct ttm_buffer_object *bo,
 			rbo->placement.num_busy_placement = 0;
 			for (i = 0; i < rbo->placement.num_placement; i++) {
 				if (rbo->placements[i].flags & TTM_PL_FLAG_VRAM) {
-					if (rbo->placements[0].fpfn < fpfn)
-						rbo->placements[0].fpfn = fpfn;
+					if (rbo->placements[i].fpfn < fpfn)
+						rbo->placements[i].fpfn = fpfn;
 				} else {
 					rbo->placement.busy_placement =
 						&rbo->placements[i];
@@ -863,6 +863,7 @@ static struct ttm_bo_driver radeon_bo_driver = {
 	.ttm_tt_unpopulate = &radeon_ttm_tt_unpopulate,
 	.invalidate_caches = &radeon_invalidate_caches,
 	.init_mem_type = &radeon_init_mem_type,
+	.eviction_valuable = ttm_bo_eviction_valuable,
 	.evict_flags = &radeon_evict_flags,
 	.move = &radeon_bo_move,
 	.verify_access = &radeon_verify_access,

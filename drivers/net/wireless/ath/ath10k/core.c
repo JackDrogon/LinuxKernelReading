@@ -198,6 +198,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9984/qca9994 hw1.0",
 		.patch_load_addr = QCA9984_HW_1_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_EACH,
 		.otp_exe_param = 0x00000700,
 		.continuous_frag_desc = true,
 		.cck_rate_map_rev2 = true,
@@ -223,6 +224,7 @@ static const struct ath10k_hw_params ath10k_hw_params_list[] = {
 		.name = "qca9888 hw2.0",
 		.patch_load_addr = QCA9888_HW_2_0_PATCH_LOAD_ADDR,
 		.uart_pin = 7,
+		.cc_wraparound_type = ATH10K_HW_CC_WRAP_SHIFTED_EACH,
 		.otp_exe_param = 0x00000700,
 		.continuous_frag_desc = true,
 		.channel_counters_freq_hz = 150000,
@@ -324,6 +326,7 @@ static const char *const ath10k_core_fw_feature_str[] = {
 	[ATH10K_FW_FEATURE_PEER_FLOW_CONTROL] = "peer-flow-ctrl",
 	[ATH10K_FW_FEATURE_BTCOEX_PARAM] = "btcoex-param",
 	[ATH10K_FW_FEATURE_SKIP_NULL_FUNC_WAR] = "skip-null-func-war",
+	[ATH10K_FW_FEATURE_ALLOWS_MESH_BCAST] = "allows-mesh-bcast",
 };
 
 static unsigned int ath10k_core_get_fw_feature_str(char *buf,
@@ -1560,6 +1563,15 @@ static void ath10k_core_restart(struct work_struct *work)
 	mutex_unlock(&ar->conf_mutex);
 }
 
+static void ath10k_core_set_coverage_class_work(struct work_struct *work)
+{
+	struct ath10k *ar = container_of(work, struct ath10k,
+					 set_coverage_class_work);
+
+	if (ar->hw_params.hw_ops->set_coverage_class)
+		ar->hw_params.hw_ops->set_coverage_class(ar, -1);
+}
+
 static int ath10k_core_init_firmware_features(struct ath10k *ar)
 {
 	struct ath10k_fw_file *fw_file = &ar->normal_mode_fw.fw_file;
@@ -1846,7 +1858,7 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode,
 		goto err_wmi_detach;
 	}
 
-	status = ath10k_htt_tx_alloc(&ar->htt);
+	status = ath10k_htt_tx_start(&ar->htt);
 	if (status) {
 		ath10k_err(ar, "failed to alloc htt tx: %d\n", status);
 		goto err_wmi_detach;
@@ -1901,7 +1913,8 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode,
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "firmware %s booted\n",
 		   ar->hw->wiphy->fw_version);
 
-	if (test_bit(WMI_SERVICE_EXT_RES_CFG_SUPPORT, ar->wmi.svc_map)) {
+	if (test_bit(WMI_SERVICE_EXT_RES_CFG_SUPPORT, ar->wmi.svc_map) &&
+	    mode == ATH10K_FIRMWARE_MODE_NORMAL) {
 		val = 0;
 		if (ath10k_peer_stats_enabled(ar))
 			val = WMI_10_4_PEER_STATS;
@@ -1954,10 +1967,13 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode,
 	 * possible to implicitly make it correct by creating a dummy vdev and
 	 * then deleting it.
 	 */
-	status = ath10k_core_reset_rx_filter(ar);
-	if (status) {
-		ath10k_err(ar, "failed to reset rx filter: %d\n", status);
-		goto err_hif_stop;
+	if (mode == ATH10K_FIRMWARE_MODE_NORMAL) {
+		status = ath10k_core_reset_rx_filter(ar);
+		if (status) {
+			ath10k_err(ar,
+				   "failed to reset rx filter: %d\n", status);
+			goto err_hif_stop;
+		}
 	}
 
 	/* If firmware indicates Full Rx Reorder support it must be used in a
@@ -2041,7 +2057,7 @@ void ath10k_core_stop(struct ath10k *ar)
 		ath10k_wait_for_suspend(ar, WMI_PDEV_SUSPEND_AND_DISABLE_INTR);
 
 	ath10k_hif_stop(ar);
-	ath10k_htt_tx_free(&ar->htt);
+	ath10k_htt_tx_stop(&ar->htt);
 	ath10k_htt_rx_free(&ar->htt);
 	ath10k_wmi_detach(ar);
 }
@@ -2342,6 +2358,8 @@ struct ath10k *ath10k_core_create(size_t priv_size, struct device *dev,
 
 	INIT_WORK(&ar->register_work, ath10k_core_register_work);
 	INIT_WORK(&ar->restart_work, ath10k_core_restart);
+	INIT_WORK(&ar->set_coverage_class_work,
+		  ath10k_core_set_coverage_class_work);
 
 	init_dummy_netdev(&ar->napi_dev);
 
@@ -2372,6 +2390,7 @@ void ath10k_core_destroy(struct ath10k *ar)
 	destroy_workqueue(ar->workqueue_aux);
 
 	ath10k_debug_destroy(ar);
+	ath10k_htt_tx_destroy(&ar->htt);
 	ath10k_wmi_free_host_mem(ar);
 	ath10k_mac_destroy(ar);
 }

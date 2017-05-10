@@ -172,7 +172,7 @@ static void __drop_largest_extent(struct inode *inode,
 
 	if (fofs < largest->fofs + largest->len && fofs + len > largest->fofs) {
 		largest->len = 0;
-		f2fs_mark_inode_dirty_sync(inode);
+		f2fs_mark_inode_dirty_sync(inode, true);
 	}
 }
 
@@ -352,11 +352,12 @@ static struct extent_node *__try_merge_extent_node(struct inode *inode,
 	}
 
 	if (next_ex && __is_front_mergeable(ei, &next_ex->ei)) {
-		if (en)
-			__release_extent_node(sbi, et, prev_ex);
 		next_ex->ei.fofs = ei->fofs;
 		next_ex->ei.blk = ei->blk;
 		next_ex->ei.len += ei->len;
+		if (en)
+			__release_extent_node(sbi, et, prev_ex);
+
 		en = next_ex;
 	}
 

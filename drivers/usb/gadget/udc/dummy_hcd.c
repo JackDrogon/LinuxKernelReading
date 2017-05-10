@@ -503,7 +503,7 @@ static int dummy_enable(struct usb_ep *_ep,
 	 * maximum packet size.
 	 * For SS devices the wMaxPacketSize is limited by 1024.
 	 */
-	max = usb_endpoint_maxp(desc) & 0x7ff;
+	max = usb_endpoint_maxp(desc);
 
 	/* drivers must not request bad settings, since lower levels
 	 * (hardware or its drivers) may not check.  some endpoints
@@ -1031,6 +1031,8 @@ static int dummy_udc_probe(struct platform_device *pdev)
 	int		rc;
 
 	dum = *((void **)dev_get_platdata(&pdev->dev));
+	/* Clear usb_gadget region for new registration to udc-core */
+	memzero_explicit(&dum->gadget, sizeof(struct usb_gadget));
 	dum->gadget.name = gadget_name;
 	dum->gadget.ops = &dummy_ops;
 	dum->gadget.max_speed = USB_SPEED_SUPER;
@@ -1483,8 +1485,7 @@ static int periodic_bytes(struct dummy *dum, struct dummy_ep *ep)
 		int	tmp;
 
 		/* high bandwidth mode */
-		tmp = usb_endpoint_maxp(ep->desc);
-		tmp = (tmp >> 11) & 0x03;
+		tmp = usb_endpoint_maxp_mult(ep->desc);
 		tmp *= 8 /* applies to entire frame */;
 		limit += limit * tmp;
 	}

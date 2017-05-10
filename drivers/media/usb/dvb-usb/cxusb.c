@@ -59,23 +59,24 @@ static int cxusb_ctrl_msg(struct dvb_usb_device *d,
 			  u8 cmd, u8 *wbuf, int wlen, u8 *rbuf, int rlen)
 {
 	struct cxusb_state *st = d->priv;
-	int ret, wo;
+	int ret;
 
 	if (1 + wlen > MAX_XFER_SIZE) {
 		warn("i2c wr: len=%d is too big!\n", wlen);
 		return -EOPNOTSUPP;
 	}
 
-	wo = (rbuf == NULL || rlen == 0); /* write-only */
+	if (rlen > MAX_XFER_SIZE) {
+		warn("i2c rd: len=%d is too big!\n", rlen);
+		return -EOPNOTSUPP;
+	}
 
 	mutex_lock(&d->data_mutex);
 	st->data[0] = cmd;
 	memcpy(&st->data[1], wbuf, wlen);
-	if (wo)
-		ret = dvb_usb_generic_write(d, st->data, 1 + wlen);
-	else
-		ret = dvb_usb_generic_rw(d, st->data, 1 + wlen,
-					 rbuf, rlen, 0);
+	ret = dvb_usb_generic_rw(d, st->data, 1 + wlen, st->data, rlen, 0);
+	if (!ret && rbuf && rlen)
+		memcpy(rbuf, st->data, rlen);
 
 	mutex_unlock(&d->data_mutex);
 	return ret;
@@ -367,6 +368,26 @@ static int cxusb_aver_streaming_ctrl(struct dvb_usb_adapter *adap, int onoff)
 		cxusb_ctrl_msg(adap->dev, CMD_AVER_STREAM_OFF,
 			       NULL, 0, NULL, 0);
 	return 0;
+}
+
+static int cxusb_read_status(struct dvb_frontend *fe,
+				  enum fe_status *status)
+{
+	struct dvb_usb_adapter *adap = (struct dvb_usb_adapter *)fe->dvb->priv;
+	struct cxusb_state *state = (struct cxusb_state *)adap->dev->priv;
+	int ret;
+
+	ret = state->fe_read_status(fe, status);
+
+	/* it need resync slave fifo when signal change from unlock to lock.*/
+	if ((*status & FE_HAS_LOCK) && (!state->last_lock)) {
+		mutex_lock(&state->stream_mutex);
+		cxusb_streaming_ctrl(adap, 1);
+		mutex_unlock(&state->stream_mutex);
+	}
+
+	state->last_lock = (*status & FE_HAS_LOCK) ? 1 : 0;
+	return ret;
 }
 
 static void cxusb_d680_dmb_drain_message(struct dvb_usb_device *d)
@@ -1371,6 +1392,12 @@ static int cxusb_mygica_t230_frontend_attach(struct dvb_usb_adapter *adap)
 	}
 
 	st->i2c_client_tuner = client_tuner;
+
+	/* hook fe: need to resync the slave fifo when signal locks. */
+	mutex_init(&st->stream_mutex);
+	st->last_lock = 0;
+	st->fe_read_status = adap->fe_adap[0].fe->ops.read_status;
+	adap->fe_adap[0].fe->ops.read_status = cxusb_read_status;
 
 	return 0;
 }

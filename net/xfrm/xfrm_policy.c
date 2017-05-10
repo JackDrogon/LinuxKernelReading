@@ -3062,6 +3062,11 @@ static int __net_init xfrm_net_init(struct net *net)
 {
 	int rv;
 
+	/* Initialize the per-net locks here */
+	spin_lock_init(&net->xfrm.xfrm_state_lock);
+	spin_lock_init(&net->xfrm.xfrm_policy_lock);
+	mutex_init(&net->xfrm.xfrm_cfg_mutex);
+
 	rv = xfrm_statistics_init(net);
 	if (rv < 0)
 		goto out_statistics;
@@ -3077,11 +3082,6 @@ static int __net_init xfrm_net_init(struct net *net)
 	rv = flow_cache_init(net);
 	if (rv < 0)
 		goto out;
-
-	/* Initialize the per-net locks here */
-	spin_lock_init(&net->xfrm.xfrm_state_lock);
-	spin_lock_init(&net->xfrm.xfrm_policy_lock);
-	mutex_init(&net->xfrm.xfrm_cfg_mutex);
 
 	return 0;
 
@@ -3113,6 +3113,7 @@ static struct pernet_operations __net_initdata xfrm_net_ops = {
 
 void __init xfrm_init(void)
 {
+	flow_cache_hp_init();
 	register_pernet_subsys(&xfrm_net_ops);
 	seqcount_init(&xfrm_policy_hash_generation);
 	xfrm_input_init();

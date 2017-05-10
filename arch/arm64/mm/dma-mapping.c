@@ -352,6 +352,13 @@ static int __swiotlb_dma_supported(struct device *hwdev, u64 mask)
 	return 1;
 }
 
+static int __swiotlb_dma_mapping_error(struct device *hwdev, dma_addr_t addr)
+{
+	if (swiotlb)
+		return swiotlb_dma_mapping_error(hwdev, addr);
+	return 0;
+}
+
 static struct dma_map_ops swiotlb_dma_ops = {
 	.alloc = __dma_alloc,
 	.free = __dma_free,
@@ -366,7 +373,7 @@ static struct dma_map_ops swiotlb_dma_ops = {
 	.sync_sg_for_cpu = __swiotlb_sync_sg_for_cpu,
 	.sync_sg_for_device = __swiotlb_sync_sg_for_device,
 	.dma_supported = __swiotlb_dma_supported,
-	.mapping_error = swiotlb_dma_mapping_error,
+	.mapping_error = __swiotlb_dma_mapping_error,
 };
 
 static int __init atomic_pool_init(void)
@@ -524,7 +531,8 @@ EXPORT_SYMBOL(dummy_dma_ops);
 
 static int __init arm64_dma_init(void)
 {
-	if (swiotlb_force || max_pfn > (arm64_dma_phys_limit >> PAGE_SHIFT))
+	if (swiotlb_force == SWIOTLB_FORCE ||
+	    max_pfn > (arm64_dma_phys_limit >> PAGE_SHIFT))
 		swiotlb = 1;
 
 	return atomic_pool_init();
@@ -796,6 +804,8 @@ static struct dma_map_ops iommu_dma_ops = {
 	.sync_single_for_device = __iommu_sync_single_for_device,
 	.sync_sg_for_cpu = __iommu_sync_sg_for_cpu,
 	.sync_sg_for_device = __iommu_sync_sg_for_device,
+	.map_resource = iommu_dma_map_resource,
+	.unmap_resource = iommu_dma_unmap_resource,
 	.dma_supported = iommu_dma_supported,
 	.mapping_error = iommu_dma_mapping_error,
 };
@@ -938,11 +948,6 @@ static void __iommu_setup_dma_ops(struct device *dev, u64 dma_base, u64 size,
 
 void arch_teardown_dma_ops(struct device *dev)
 {
-	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
-
-	if (WARN_ON(domain))
-		iommu_detach_device(domain, dev);
-
 	dev->archdata.dma_ops = NULL;
 }
 

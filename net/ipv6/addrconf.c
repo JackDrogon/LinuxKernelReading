@@ -238,6 +238,11 @@ static struct ipv6_devconf ipv6_devconf __read_mostly = {
 	.use_oif_addrs_only	= 0,
 	.ignore_routes_with_linkdown = 0,
 	.keep_addr_on_down	= 0,
+	.seg6_enabled		= 0,
+#ifdef CONFIG_IPV6_SEG6_HMAC
+	.seg6_require_hmac	= 0,
+#endif
+	.enhanced_dad           = 1,
 };
 
 static struct ipv6_devconf ipv6_devconf_dflt __read_mostly = {
@@ -284,6 +289,11 @@ static struct ipv6_devconf ipv6_devconf_dflt __read_mostly = {
 	.use_oif_addrs_only	= 0,
 	.ignore_routes_with_linkdown = 0,
 	.keep_addr_on_down	= 0,
+	.seg6_enabled		= 0,
+#ifdef CONFIG_IPV6_SEG6_HMAC
+	.seg6_require_hmac	= 0,
+#endif
+	.enhanced_dad           = 1,
 };
 
 /* Check if a valid qdisc is available */
@@ -3253,14 +3263,24 @@ static void addrconf_gre_config(struct net_device *dev)
 static int fixup_permanent_addr(struct inet6_dev *idev,
 				struct inet6_ifaddr *ifp)
 {
-	if (!ifp->rt) {
-		struct rt6_info *rt;
+	/* rt6i_ref == 0 means the host route was removed from the
+	 * FIB, for example, if 'lo' device is taken down. In that
+	 * case regenerate the host route.
+	 */
+	if (!ifp->rt || !atomic_read(&ifp->rt->rt6i_ref)) {
+		struct rt6_info *rt, *prev;
 
 		rt = addrconf_dst_alloc(idev, &ifp->addr, false);
 		if (unlikely(IS_ERR(rt)))
 			return PTR_ERR(rt);
 
+		/* ifp->rt can be accessed outside of rtnl */
+		spin_lock(&ifp->lock);
+		prev = ifp->rt;
 		ifp->rt = rt;
+		spin_unlock(&ifp->lock);
+
+		ip6_rt_put(prev);
 	}
 
 	if (!(ifp->flags & IFA_F_NOPREFIXROUTE)) {
@@ -3376,9 +3396,15 @@ static int addrconf_notify(struct notifier_block *this, unsigned long event,
 			}
 
 			if (idev) {
-				if (idev->if_flags & IF_READY)
-					/* device is already configured. */
+				if (idev->if_flags & IF_READY) {
+					/* device is already configured -
+					 * but resend MLD reports, we might
+					 * have roamed and need to update
+					 * multicast snooping switches
+					 */
+					ipv6_mc_up(idev);
 					break;
+				}
 				idev->if_flags |= IF_READY;
 			}
 
@@ -3602,14 +3628,19 @@ restart:
 	INIT_LIST_HEAD(&del_list);
 	list_for_each_entry_safe(ifa, tmp, &idev->addr_list, if_list) {
 		struct rt6_info *rt = NULL;
+		bool keep;
 
 		addrconf_del_dad_work(ifa);
+
+		keep = keep_addr && (ifa->flags & IFA_F_PERMANENT) &&
+			!addr_is_local(&ifa->addr);
+		if (!keep)
+			list_move(&ifa->if_list, &del_list);
 
 		write_unlock_bh(&idev->lock);
 		spin_lock_bh(&ifa->lock);
 
-		if (keep_addr && (ifa->flags & IFA_F_PERMANENT) &&
-		    !addr_is_local(&ifa->addr)) {
+		if (keep) {
 			/* set state to skip the notifier below */
 			state = INET6_IFADDR_STATE_DEAD;
 			ifa->state = 0;
@@ -3621,8 +3652,6 @@ restart:
 		} else {
 			state = ifa->state;
 			ifa->state = INET6_IFADDR_STATE_DEAD;
-
-			list_move(&ifa->if_list, &del_list);
 		}
 
 		spin_unlock_bh(&ifa->lock);
@@ -3727,12 +3756,21 @@ static void addrconf_dad_kick(struct inet6_ifaddr *ifp)
 {
 	unsigned long rand_num;
 	struct inet6_dev *idev = ifp->idev;
+	u64 nonce;
 
 	if (ifp->flags & IFA_F_OPTIMISTIC)
 		rand_num = 0;
 	else
 		rand_num = prandom_u32() % (idev->cnf.rtr_solicit_delay ? : 1);
 
+	nonce = 0;
+	if (idev->cnf.enhanced_dad ||
+	    dev_net(idev->dev)->ipv6.devconf_all->enhanced_dad) {
+		do
+			get_random_bytes(&nonce, 6);
+		while (nonce == 0);
+	}
+	ifp->dad_nonce = nonce;
 	ifp->dad_probes = idev->cnf.dad_transmits;
 	addrconf_mod_dad_work(ifp, rand_num);
 }
@@ -3910,7 +3948,8 @@ static void addrconf_dad_work(struct work_struct *w)
 
 	/* send a neighbour solicitation for our addr */
 	addrconf_addr_solict_mult(&ifp->addr, &mcaddr);
-	ndisc_send_ns(ifp->idev->dev, &ifp->addr, &mcaddr, &in6addr_any);
+	ndisc_send_ns(ifp->idev->dev, &ifp->addr, &mcaddr, &in6addr_any,
+		      ifp->dad_nonce);
 out:
 	in6_ifa_put(ifp);
 	rtnl_unlock();
@@ -3989,6 +4028,12 @@ static void addrconf_dad_completed(struct inet6_ifaddr *ifp, bool bump_id)
 
 	if (bump_id)
 		rt_genid_bump_ipv6(dev_net(dev));
+
+	/* Make sure that a new temporary address will be created
+	 * before this temporary address becomes deprecated.
+	 */
+	if (ifp->flags & IFA_F_TEMPORARY)
+		addrconf_verify_rtnl();
 }
 
 static void addrconf_dad_run(struct inet6_dev *idev)
@@ -4950,6 +4995,11 @@ static inline void ipv6_store_devconf(struct ipv6_devconf *cnf,
 	array[DEVCONF_DROP_UNICAST_IN_L2_MULTICAST] = cnf->drop_unicast_in_l2_multicast;
 	array[DEVCONF_DROP_UNSOLICITED_NA] = cnf->drop_unsolicited_na;
 	array[DEVCONF_KEEP_ADDR_ON_DOWN] = cnf->keep_addr_on_down;
+	array[DEVCONF_SEG6_ENABLED] = cnf->seg6_enabled;
+#ifdef CONFIG_IPV6_SEG6_HMAC
+	array[DEVCONF_SEG6_REQUIRE_HMAC] = cnf->seg6_require_hmac;
+#endif
+	array[DEVCONF_ENHANCED_DAD] = cnf->enhanced_dad;
 }
 
 static inline size_t inet6_ifla6_size(void)
@@ -5515,8 +5565,7 @@ static void addrconf_disable_change(struct net *net, __s32 newf)
 	struct net_device *dev;
 	struct inet6_dev *idev;
 
-	rcu_read_lock();
-	for_each_netdev_rcu(net, dev) {
+	for_each_netdev(net, dev) {
 		idev = __in6_dev_get(dev);
 		if (idev) {
 			int changed = (!idev->cnf.disable_ipv6) ^ (!newf);
@@ -5525,7 +5574,6 @@ static void addrconf_disable_change(struct net *net, __s32 newf)
 				dev_disable_change(idev);
 		}
 	}
-	rcu_read_unlock();
 }
 
 static int addrconf_disable_ipv6(struct ctl_table *table, int *p, int newf)
@@ -6040,6 +6088,29 @@ static const struct ctl_table addrconf_sysctl[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 
+	},
+	{
+		.procname	= "seg6_enabled",
+		.data		= &ipv6_devconf.seg6_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#ifdef CONFIG_IPV6_SEG6_HMAC
+	{
+		.procname	= "seg6_require_hmac",
+		.data		= &ipv6_devconf.seg6_require_hmac,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif
+	{
+		.procname       = "enhanced_dad",
+		.data           = &ipv6_devconf.enhanced_dad,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec,
 	},
 	{
 		/* sentinel */

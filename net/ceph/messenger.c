@@ -7,6 +7,7 @@
 #include <linux/kthread.h>
 #include <linux/net.h>
 #include <linux/nsproxy.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/socket.h>
 #include <linux/string.h>
@@ -469,11 +470,16 @@ static int ceph_tcp_connect(struct ceph_connection *con)
 {
 	struct sockaddr_storage *paddr = &con->peer_addr.in_addr;
 	struct socket *sock;
+	unsigned int noio_flag;
 	int ret;
 
 	BUG_ON(con->sock);
+
+	/* sock_create_kern() allocates with GFP_KERNEL */
+	noio_flag = memalloc_noio_save();
 	ret = sock_create_kern(read_pnet(&con->msgr->net), paddr->ss_family,
 			       SOCK_STREAM, IPPROTO_TCP, &sock);
+	memalloc_noio_restore(noio_flag);
 	if (ret)
 		return ret;
 	sock->sk->sk_allocation = GFP_NOFS;
@@ -1393,15 +1399,9 @@ static struct ceph_auth_handshake *get_connect_authorizer(struct ceph_connection
 		return NULL;
 	}
 
-	/* Can't hold the mutex while getting authorizer */
-	mutex_unlock(&con->mutex);
 	auth = con->ops->get_authorizer(con, auth_proto, con->auth_retry);
-	mutex_lock(&con->mutex);
-
 	if (IS_ERR(auth))
 		return auth;
-	if (con->state != CON_STATE_NEGOTIATING)
-		return ERR_PTR(-EAGAIN);
 
 	con->auth_reply_buf = auth->authorizer_reply_buf;
 	con->auth_reply_buf_len = auth->authorizer_reply_buf_len;
@@ -2033,7 +2033,7 @@ static int process_connect(struct ceph_connection *con)
 		 * should also define ->verify_authorizer_reply().
 		 * See get_connect_authorizer().
 		 */
-		ret = con->ops->verify_authorizer_reply(con, 0);
+		ret = con->ops->verify_authorizer_reply(con);
 		if (ret < 0) {
 			con->error_msg = "bad authorize reply";
 			return ret;

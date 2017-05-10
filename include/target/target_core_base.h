@@ -1,14 +1,10 @@
 #ifndef TARGET_CORE_BASE_H
 #define TARGET_CORE_BASE_H
 
-#include <linux/in.h>
-#include <linux/configfs.h>
-#include <linux/dma-mapping.h>
-#include <linux/blkdev.h>
-#include <linux/percpu_ida.h>
-#include <linux/t10-pi.h>
-#include <net/sock.h>
-#include <net/tcp.h>
+#include <linux/configfs.h>      /* struct config_group */
+#include <linux/dma-direction.h> /* enum dma_data_direction */
+#include <linux/percpu_ida.h>    /* struct percpu_ida */
+#include <linux/semaphore.h>     /* struct semaphore */
 
 #define TARGET_CORE_VERSION		"v5.0"
 
@@ -149,7 +145,7 @@ enum se_cmd_flags_table {
  * Used by transport_send_check_condition_and_sense()
  * to signal which ASC/ASCQ sense payload should be built.
  */
-typedef unsigned __bitwise__ sense_reason_t;
+typedef unsigned __bitwise sense_reason_t;
 
 enum tcm_sense_reason_table {
 #define R(x)	(__force sense_reason_t )(x)
@@ -178,6 +174,10 @@ enum tcm_sense_reason_table {
 	TCM_LOGICAL_BLOCK_APP_TAG_CHECK_FAILED	= R(0x16),
 	TCM_LOGICAL_BLOCK_REF_TAG_CHECK_FAILED	= R(0x17),
 	TCM_COPY_TARGET_DEVICE_NOT_REACHABLE	= R(0x18),
+	TCM_TOO_MANY_TARGET_DESCS		= R(0x19),
+	TCM_UNSUPPORTED_TARGET_DESC_TYPE_CODE	= R(0x1a),
+	TCM_TOO_MANY_SEGMENT_DESCS		= R(0x1b),
+	TCM_UNSUPPORTED_SEGMENT_DESC_TYPE_CODE	= R(0x1c),
 #undef R
 };
 
@@ -538,6 +538,7 @@ struct se_node_acl {
 	char			initiatorname[TRANSPORT_IQN_LEN];
 	/* Used to signal demo mode created ACL, disabled by default */
 	bool			dynamic_node_acl;
+	bool			dynamic_stop;
 	u32			queue_depth;
 	u32			acl_index;
 	enum target_prot_type	saved_prot_type;
@@ -704,6 +705,7 @@ struct se_lun {
 	u64			unpacked_lun;
 #define SE_LUN_LINK_MAGIC			0xffff7771
 	u32			lun_link_magic;
+	bool			lun_shutdown;
 	bool			lun_access_ro;
 	u32			lun_index;
 
@@ -731,6 +733,7 @@ struct se_lun {
 	struct config_group	lun_group;
 	struct se_port_stat_grps port_stat_grps;
 	struct completion	lun_ref_comp;
+	struct completion	lun_shutdown_comp;
 	struct percpu_ref	lun_ref;
 	struct list_head	lun_dev_link;
 	struct hlist_node	link;

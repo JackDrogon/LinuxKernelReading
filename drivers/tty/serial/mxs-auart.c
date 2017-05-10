@@ -1016,7 +1016,7 @@ static void mxs_auart_settermios(struct uart_port *u,
 			ctrl |= AUART_LINECTRL_EPS;
 	}
 
-	u->read_status_mask = 0;
+	u->read_status_mask = AUART_STAT_OERR;
 
 	if (termios->c_iflag & INPCK)
 		u->read_status_mask |= AUART_STAT_PERR;
@@ -1085,7 +1085,7 @@ static void mxs_auart_settermios(struct uart_port *u,
 					AUART_LINECTRL_BAUD_DIV_MAX);
 		baud_max = u->uartclk * 32 / AUART_LINECTRL_BAUD_DIV_MIN;
 		baud = uart_get_baud_rate(u, termios, old, baud_min, baud_max);
-		div = u->uartclk * 32 / baud;
+		div = DIV_ROUND_CLOSEST(u->uartclk * 32, baud);
 	}
 
 	ctrl |= AUART_LINECTRL_BAUD_DIVFRAC(div & 0x3F);

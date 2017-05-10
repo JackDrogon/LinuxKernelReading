@@ -2847,7 +2847,7 @@ static void ftrace_shutdown_sysctl(void)
 	}
 }
 
-static cycle_t		ftrace_update_time;
+static u64		ftrace_update_time;
 unsigned long		ftrace_update_tot_cnt;
 
 static inline int ops_traces_mod(struct ftrace_ops *ops)
@@ -2894,7 +2894,7 @@ static int ftrace_update_code(struct module *mod, struct ftrace_page *new_pgs)
 {
 	struct ftrace_page *pg;
 	struct dyn_ftrace *p;
-	cycle_t start, stop;
+	u64 start, stop;
 	unsigned long update_cnt = 0;
 	unsigned long rec_flags = 0;
 	int i;
@@ -3511,6 +3511,10 @@ static int ftrace_match(char *str, struct ftrace_glob *g)
 		    memcmp(str + slen - g->len, g->search, g->len) == 0)
 			matched = 1;
 		break;
+	case MATCH_GLOB:
+		if (glob_match(g->search, str))
+			matched = 1;
+		break;
 	}
 
 	return matched;
@@ -3736,23 +3740,24 @@ static void __enable_ftrace_function_probe(struct ftrace_ops_hash *old_hash)
 	ftrace_probe_registered = 1;
 }
 
-static void __disable_ftrace_function_probe(void)
+static bool __disable_ftrace_function_probe(void)
 {
 	int i;
 
 	if (!ftrace_probe_registered)
-		return;
+		return false;
 
 	for (i = 0; i < FTRACE_FUNC_HASHSIZE; i++) {
 		struct hlist_head *hhd = &ftrace_func_hash[i];
 		if (hhd->first)
-			return;
+			return false;
 	}
 
 	/* no more funcs left */
 	ftrace_shutdown(&trace_probe_ops, 0);
 
 	ftrace_probe_registered = 0;
+	return true;
 }
 
 
@@ -3882,6 +3887,7 @@ static void
 __unregister_ftrace_function_probe(char *glob, struct ftrace_probe_ops *ops,
 				  void *data, int flags)
 {
+	struct ftrace_ops_hash old_hash_ops;
 	struct ftrace_func_entry *rec_entry;
 	struct ftrace_func_probe *entry;
 	struct ftrace_func_probe *p;
@@ -3893,6 +3899,7 @@ __unregister_ftrace_function_probe(char *glob, struct ftrace_probe_ops *ops,
 	struct hlist_node *tmp;
 	char str[KSYM_SYMBOL_LEN];
 	int i, ret;
+	bool disabled;
 
 	if (glob && (strcmp(glob, "*") == 0 || !strlen(glob)))
 		func_g.search = NULL;
@@ -3910,6 +3917,10 @@ __unregister_ftrace_function_probe(char *glob, struct ftrace_probe_ops *ops,
 	}
 
 	mutex_lock(&trace_probe_ops.func_hash->regex_lock);
+
+	old_hash_ops.filter_hash = old_hash;
+	/* Probes only have filters */
+	old_hash_ops.notrace_hash = NULL;
 
 	hash = alloc_and_copy_ftrace_hash(FTRACE_HASH_DEFAULT_BITS, *orig_hash);
 	if (!hash)
@@ -3948,12 +3959,17 @@ __unregister_ftrace_function_probe(char *glob, struct ftrace_probe_ops *ops,
 		}
 	}
 	mutex_lock(&ftrace_lock);
-	__disable_ftrace_function_probe();
+	disabled = __disable_ftrace_function_probe();
 	/*
 	 * Remove after the disable is called. Otherwise, if the last
 	 * probe is removed, a null hash means *all enabled*.
 	 */
 	ret = ftrace_hash_move(&trace_probe_ops, 1, orig_hash, hash);
+
+	/* still need to update the function call sites */
+	if (ftrace_enabled && !disabled)
+		ftrace_run_modify_code(&trace_probe_ops, FTRACE_UPDATE_CALLS,
+				       &old_hash_ops);
 	synchronize_sched();
 	if (!ret)
 		free_ftrace_hash_rcu(old_hash);
@@ -4257,6 +4273,23 @@ int ftrace_set_filter_ip(struct ftrace_ops *ops, unsigned long ip,
 	return ftrace_set_addr(ops, ip, remove, reset, 1);
 }
 EXPORT_SYMBOL_GPL(ftrace_set_filter_ip);
+
+/**
+ * ftrace_ops_set_global_filter - setup ops to use global filters
+ * @ops - the ops which will use the global filters
+ *
+ * ftrace users who need global function trace filtering should call this.
+ * It can set the global filter only if ops were not initialized before.
+ */
+void ftrace_ops_set_global_filter(struct ftrace_ops *ops)
+{
+	if (ops->flags & FTRACE_OPS_FL_INITIALIZED)
+		return;
+
+	ftrace_ops_init(ops);
+	ops->func_hash = &global_ops.local_hash;
+}
+EXPORT_SYMBOL_GPL(ftrace_ops_set_global_filter);
 
 static int
 ftrace_set_regex(struct ftrace_ops *ops, unsigned char *buf, int len,
@@ -5387,6 +5420,15 @@ static void clear_ftrace_pids(struct trace_array *tr)
 	synchronize_sched();
 
 	trace_free_pid_list(pid_list);
+}
+
+void ftrace_clear_pids(struct trace_array *tr)
+{
+	mutex_lock(&ftrace_lock);
+
+	clear_ftrace_pids(tr);
+
+	mutex_unlock(&ftrace_lock);
 }
 
 static void ftrace_pid_reset(struct trace_array *tr)
