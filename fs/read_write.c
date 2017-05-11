@@ -419,6 +419,8 @@ int rw_verify_area(int read_write, struct file *file, const loff_t *ppos, size_t
 	}
 
 	if (unlikely(inode->i_flctx && mandatory_lock(inode))) {
+		// 这里locks_mandatory_areas是调用的fs.h那个不是lock.c中的那个
+		// 不过也说不定，这个只是死锁检测，可能开了某个内核的配置就会有了吧
 		retval = locks_mandatory_area(inode, file, pos, pos + count - 1,
 				read_write == READ ? F_RDLCK : F_WRLCK);
 		if (retval < 0)
@@ -448,10 +450,11 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 ssize_t __vfs_read(struct file *file, char __user *buf, size_t count,
 		   loff_t *pos)
 {
+	// 调用对应的fs的read，没有read就调用read_iter, 否则报错
 	if (file->f_op->read)
 		return file->f_op->read(file, buf, count, pos);
 	else if (file->f_op->read_iter)
-		return new_sync_read(file, buf, count, pos);
+		return new_sync_read(file, buf, count, pos); // 同步读
 	else
 		return -EINVAL;
 }
@@ -461,6 +464,7 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
 
+	// 由此可见，文件的权限是否可读是在vfs层做了的
 	if (!(file->f_mode & FMODE_READ))
 		return -EBADF;
 	if (!(file->f_mode & FMODE_CAN_READ))
@@ -468,16 +472,18 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 	if (unlikely(!access_ok(VERIFY_WRITE, buf, count)))
 		return -EFAULT;
 
+	// 检测文件是否可读，可能有死锁检测，主要是检测长度是否正确，宝库负数count和位置溢出
 	ret = rw_verify_area(READ, file, pos, count);
 	if (!ret) {
+		// MAX_RW_COUNT (INT_MAX & PAGE_MASK)
 		if (count > MAX_RW_COUNT)
 			count =  MAX_RW_COUNT;
-		ret = __vfs_read(file, buf, count, pos);
+		ret = __vfs_read(file, buf, count, pos); // 传递给__vfs_read
 		if (ret > 0) {
-			fsnotify_access(file);
-			add_rchar(current, ret);
+			fsnotify_access(file); // 文件读事件通知，会向parent传递
+			add_rchar(current, ret); // 向当前线程的task队列添加一个读事件，也许是用于io统计
 		}
-		inc_syscr(current);
+		inc_syscr(current); // sys事件 + 1
 	}
 
 	return ret;
@@ -583,15 +589,15 @@ static inline void file_pos_write(struct file *file, loff_t pos)
 
 SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
 {
-	struct fd f = fdget_pos(fd);
+	struct fd f = fdget_pos(fd); // 从fd获取file的真正结构
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
-		loff_t pos = file_pos_read(f.file);
-		ret = vfs_read(f.file, buf, count, &pos);
+		loff_t pos = file_pos_read(f.file); // 获取在当前文件中的偏移
+		ret = vfs_read(f.file, buf, count, &pos); // vfs层读取文件
 		if (ret >= 0)
-			file_pos_write(f.file, pos);
-		fdput_pos(f);
+			file_pos_write(f.file, pos); // 读取成功后设置pos
+		fdput_pos(f); // 将因为文件读取引发的相关task放入队列
 	}
 	return ret;
 }
