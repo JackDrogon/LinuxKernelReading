@@ -195,6 +195,9 @@ static SUNXI_CCU_DIV_TABLE(axi_clk, "axi", "cpu",
 
 static const char * const ahb1_parents[] = { "osc32k", "osc24M",
 					     "axi", "pll-periph" };
+static const struct ccu_mux_var_prediv ahb1_predivs[] = {
+	{ .index = 3, .shift = 6, .width = 2 },
+};
 
 static struct ccu_div ahb1_clk = {
 	.div		= _SUNXI_CCU_DIV_FLAGS(4, 2, CLK_DIVIDER_POWER_OF_TWO),
@@ -203,11 +206,8 @@ static struct ccu_div ahb1_clk = {
 		.shift	= 12,
 		.width	= 2,
 
-		.variable_prediv	= {
-			.index	= 3,
-			.shift	= 6,
-			.width	= 2,
-		},
+		.var_predivs	= ahb1_predivs,
+		.n_var_predivs	= ARRAY_SIZE(ahb1_predivs),
 	},
 
 	.common		= {
@@ -468,8 +468,8 @@ static SUNXI_CCU_MUX_WITH_GATE(daudio0_clk, "daudio0", daudio_parents,
 static SUNXI_CCU_MUX_WITH_GATE(daudio1_clk, "daudio1", daudio_parents,
 			       0x0b4, 16, 2, BIT(31), CLK_SET_RATE_PARENT);
 
-static SUNXI_CCU_M_WITH_GATE(spdif_clk, "spdif", "pll-audio",
-			     0x0c0, 0, 4, BIT(31), CLK_SET_RATE_PARENT);
+static SUNXI_CCU_MUX_WITH_GATE(spdif_clk, "spdif", daudio_parents,
+			       0x0c0, 16, 2, BIT(31), CLK_SET_RATE_PARENT);
 
 static SUNXI_CCU_GATE(usb_phy0_clk,	"usb-phy0",	"osc24M",
 		      0x0cc, BIT(8), 0);
@@ -556,7 +556,7 @@ static SUNXI_CCU_M_WITH_MUX_GATE(lcd0_ch1_clk, "lcd0-ch1", lcd_ch1_parents,
 				 0x12c, 0, 4, 24, 3, BIT(31),
 				 CLK_SET_RATE_PARENT);
 static SUNXI_CCU_M_WITH_MUX_GATE(lcd1_ch1_clk, "lcd1-ch1", lcd_ch1_parents,
-				 0x12c, 0, 4, 24, 3, BIT(31),
+				 0x130, 0, 4, 24, 3, BIT(31),
 				 CLK_SET_RATE_PARENT);
 
 static const char * const csi_sclk_parents[] = { "pll-video0", "pll-video1",

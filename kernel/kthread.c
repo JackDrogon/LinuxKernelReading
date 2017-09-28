@@ -5,7 +5,9 @@
  * even if we're invoked from userspace (think modprobe, hotplug cpu,
  * etc.).
  */
+#include <uapi/linux/sched/types.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 #include <linux/kthread.h>
 #include <linux/completion.h>
 #include <linux/err.h>
@@ -635,6 +637,7 @@ repeat:
 		schedule();
 
 	try_to_freeze();
+	cond_resched();
 	goto repeat;
 }
 EXPORT_SYMBOL_GPL(kthread_worker_fn);
@@ -853,7 +856,6 @@ void __kthread_queue_delayed_work(struct kthread_worker *worker,
 
 	list_add(&work->node, &worker->delayed_work_list);
 	work->worker = worker;
-	timer_stats_timer_set_start_info(&dwork->timer);
 	timer->expires = jiffies + delay;
 	add_timer(timer);
 }

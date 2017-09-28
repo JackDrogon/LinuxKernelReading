@@ -56,7 +56,7 @@ struct serial_ir_hw {
 static int type;
 static int io;
 static int irq;
-static bool iommap;
+static ulong iommap;
 static int ioshift;
 static bool softcarrier = true;
 static bool share_irq;
@@ -137,6 +137,7 @@ struct serial_ir {
 	ktime_t lastkt;
 	struct rc_dev *rcdev;
 	struct platform_device *pdev;
+	struct timer_list timeout_timer;
 
 	unsigned int freq;
 	unsigned int duty_cycle;
@@ -395,9 +396,14 @@ static irqreturn_t serial_ir_irq_handler(int i, void *blah)
 			frbwrite(data, !(dcd ^ sense));
 			serial_ir.lastkt = kt;
 			last_dcd = dcd;
-			ir_raw_event_handle(serial_ir.rcdev);
 		}
 	} while (!(sinp(UART_IIR) & UART_IIR_NO_INT)); /* still pending ? */
+
+	mod_timer(&serial_ir.timeout_timer,
+		  jiffies + nsecs_to_jiffies(serial_ir.rcdev->timeout));
+
+	ir_raw_event_handle(serial_ir.rcdev);
+
 	return IRQ_HANDLED;
 }
 
@@ -471,6 +477,16 @@ static int hardware_init_port(void)
 	return 0;
 }
 
+static void serial_ir_timeout(unsigned long arg)
+{
+	DEFINE_IR_RAW_EVENT(ev);
+
+	ev.timeout = true;
+	ev.duration = serial_ir.rcdev->timeout;
+	ir_raw_event_store_with_filter(serial_ir.rcdev, &ev);
+	ir_raw_event_handle(serial_ir.rcdev);
+}
+
 /* Needed by serial_ir_probe() */
 static int serial_ir_tx(struct rc_dev *dev, unsigned int *txbuf,
 			unsigned int count);
@@ -484,7 +500,7 @@ static int serial_ir_probe(struct platform_device *dev)
 	struct rc_dev *rcdev;
 	int i, nlow, nhigh, result;
 
-	rcdev = devm_rc_allocate_device(&dev->dev);
+	rcdev = devm_rc_allocate_device(&dev->dev, RC_DRIVER_IR_RAW);
 	if (!rcdev)
 		return -ENOMEM;
 
@@ -521,14 +537,18 @@ static int serial_ir_probe(struct platform_device *dev)
 	rcdev->open = serial_ir_open;
 	rcdev->close = serial_ir_close;
 	rcdev->dev.parent = &serial_ir.pdev->dev;
-	rcdev->driver_type = RC_DRIVER_IR_RAW;
-	rcdev->allowed_protocols = RC_BIT_ALL;
+	rcdev->allowed_protocols = RC_BIT_ALL_IR_DECODER;
 	rcdev->driver_name = KBUILD_MODNAME;
 	rcdev->map_name = RC_MAP_RC6_MCE;
+	rcdev->min_timeout = 1;
 	rcdev->timeout = IR_DEFAULT_TIMEOUT;
+	rcdev->max_timeout = 10 * IR_DEFAULT_TIMEOUT;
 	rcdev->rx_resolution = 250000;
 
 	serial_ir.rcdev = rcdev;
+
+	setup_timer(&serial_ir.timeout_timer, serial_ir_timeout,
+		    (unsigned long)&serial_ir);
 
 	result = devm_request_irq(&dev->dev, irq, serial_ir_irq_handler,
 				  share_irq ? IRQF_SHARED : 0,
@@ -799,6 +819,7 @@ static int __init serial_ir_init_module(void)
 
 static void __exit serial_ir_exit_module(void)
 {
+	del_timer_sync(&serial_ir.timeout_timer);
 	serial_ir_exit();
 }
 
@@ -812,11 +833,11 @@ MODULE_LICENSE("GPL");
 module_param(type, int, 0444);
 MODULE_PARM_DESC(type, "Hardware type (0 = home-brew, 1 = IRdeo, 2 = IRdeo Remote, 3 = AnimaX, 4 = IgorPlug");
 
-module_param(io, int, 0444);
+module_param_hw(io, int, ioport, 0444);
 MODULE_PARM_DESC(io, "I/O address base (0x3f8 or 0x2f8)");
 
 /* some architectures (e.g. intel xscale) have memory mapped registers */
-module_param(iommap, bool, 0444);
+module_param_hw(iommap, ulong, other, 0444);
 MODULE_PARM_DESC(iommap, "physical base for memory mapped I/O (0 = no memory mapped io)");
 
 /*
@@ -824,13 +845,13 @@ MODULE_PARM_DESC(iommap, "physical base for memory mapped I/O (0 = no memory map
  * on 32bit word boundaries.
  * See linux-kernel/drivers/tty/serial/8250/8250.c serial_in()/out()
  */
-module_param(ioshift, int, 0444);
+module_param_hw(ioshift, int, other, 0444);
 MODULE_PARM_DESC(ioshift, "shift I/O register offset (0 = no shift)");
 
-module_param(irq, int, 0444);
+module_param_hw(irq, int, irq, 0444);
 MODULE_PARM_DESC(irq, "Interrupt (4 or 3)");
 
-module_param(share_irq, bool, 0444);
+module_param_hw(share_irq, bool, other, 0444);
 MODULE_PARM_DESC(share_irq, "Share interrupts (0 = off, 1 = on)");
 
 module_param(sense, int, 0444);

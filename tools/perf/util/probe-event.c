@@ -19,6 +19,7 @@
  *
  */
 
+#include <inttypes.h>
 #include <sys/utsname.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -35,6 +36,7 @@
 #include "util.h"
 #include "event.h"
 #include "strlist.h"
+#include "strfilter.h"
 #include "debug.h"
 #include "cache.h"
 #include "color.h"
@@ -46,8 +48,10 @@
 #include "probe-finder.h"
 #include "probe-file.h"
 #include "session.h"
+#include "string2.h"
 
-#define MAX_CMDLEN 256
+#include "sane_ctype.h"
+
 #define PERFPROBE_GROUP "probe"
 
 bool probe_event_dry_run;	/* Dry run flag */
@@ -594,7 +598,7 @@ static int find_perf_probe_point_from_dwarf(struct probe_trace_point *tp,
 	pr_debug("try to find information at %" PRIx64 " in %s\n", addr,
 		 tp->module ? : "kernel");
 
-	dinfo = debuginfo_cache__open(tp->module, verbose == 0);
+	dinfo = debuginfo_cache__open(tp->module, verbose <= 0);
 	if (dinfo)
 		ret = debuginfo__find_probe_point(dinfo,
 						 (unsigned long)addr, pp);
@@ -615,7 +619,7 @@ static int post_process_probe_trace_point(struct probe_trace_point *tp,
 					   struct map *map, unsigned long offs)
 {
 	struct symbol *sym;
-	u64 addr = tp->address + tp->offset - offs;
+	u64 addr = tp->address - offs;
 
 	sym = map__find_symbol(map, addr);
 	if (!sym)
@@ -757,7 +761,9 @@ post_process_kernel_probe_trace_events(struct probe_trace_event *tevs,
 	}
 
 	for (i = 0; i < ntevs; i++) {
-		if (!tevs[i].point.address || tevs[i].point.retprobe)
+		if (!tevs[i].point.address)
+			continue;
+		if (tevs[i].point.retprobe && !kretprobe_offset_is_supported())
 			continue;
 		/* If we found a wrong one, mark it by NULL symbol */
 		if (kprobe_warn_out_range(tevs[i].point.symbol,
@@ -1339,14 +1345,7 @@ static int parse_perf_probe_point(char *arg, struct perf_probe_event *pev)
 	if (!arg)
 		return -EINVAL;
 
-	/*
-	 * If the probe point starts with '%',
-	 * or starts with "sdt_" and has a ':' but no '=',
-	 * then it should be a SDT/cached probe point.
-	 */
-	if (arg[0] == '%' ||
-	    (!strncmp(arg, "sdt_", 4) &&
-	     !!strchr(arg, ':') && !strchr(arg, '='))) {
+	if (is_sdt_event(arg)) {
 		pev->sdt = true;
 		if (arg[0] == '%')
 			arg++;
@@ -1525,11 +1524,6 @@ static int parse_perf_probe_point(char *arg, struct perf_probe_event *pev)
 
 	if (pp->offset && !pp->function) {
 		semantic_error("Offset requires an entry function.\n");
-		return -EINVAL;
-	}
-
-	if (pp->retprobe && !pp->function) {
-		semantic_error("Return probe requires an entry function.\n");
 		return -EINVAL;
 	}
 
@@ -2061,7 +2055,7 @@ static int find_perf_probe_point_from_map(struct probe_trace_point *tp,
 					  bool is_kprobe)
 {
 	struct symbol *sym = NULL;
-	struct map *map;
+	struct map *map = NULL;
 	u64 addr = tp->address;
 	int ret = -ENOENT;
 
@@ -2841,7 +2835,8 @@ static int find_probe_trace_events_from_map(struct perf_probe_event *pev,
 	}
 
 	/* Note that the symbols in the kmodule are not relocated */
-	if (!pev->uprobes && !pp->retprobe && !pev->target) {
+	if (!pev->uprobes && !pev->target &&
+			(!pp->retprobe || kretprobe_offset_is_supported())) {
 		reloc_sym = kernel_get_ref_reloc_sym();
 		if (!reloc_sym) {
 			pr_warning("Relocated base symbol is not found!\n");
@@ -3023,20 +3018,17 @@ static int try_to_find_absolute_address(struct perf_probe_event *pev,
 
 	tev->nargs = pev->nargs;
 	tev->args = zalloc(sizeof(struct probe_trace_arg) * tev->nargs);
-	if (!tev->args) {
-		err = -ENOMEM;
+	if (!tev->args)
 		goto errout;
-	}
+
 	for (i = 0; i < tev->nargs; i++)
 		copy_to_probe_trace_arg(&tev->args[i], &pev->args[i]);
 
 	return 1;
 
 errout:
-	if (*tevs) {
-		clear_probe_trace_events(*tevs, 1);
-		*tevs = NULL;
-	}
+	clear_probe_trace_events(*tevs, 1);
+	*tevs = NULL;
 	return err;
 }
 
@@ -3060,7 +3052,7 @@ concat_probe_trace_events(struct probe_trace_event **tevs, int *ntevs,
 	struct probe_trace_event *new_tevs;
 	int ret = 0;
 
-	if (ntevs == 0) {
+	if (*ntevs == 0) {
 		*tevs = *tevs2;
 		*ntevs = ntevs2;
 		*tevs2 = NULL;

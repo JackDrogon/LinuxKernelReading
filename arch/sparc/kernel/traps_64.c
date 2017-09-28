@@ -9,7 +9,8 @@
  */
 
 #include <linux/extable.h>
-#include <linux/sched.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/debug.h>
 #include <linux/linkage.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
@@ -2732,6 +2733,7 @@ void do_getpsr(struct pt_regs *regs)
 	}
 }
 
+u64 cpu_mondo_counter[NR_CPUS] = {0};
 struct trap_per_cpu trap_block[NR_CPUS];
 EXPORT_SYMBOL(trap_block);
 
@@ -2837,6 +2839,6 @@ void __init trap_init(void)
 	/* Attach to the address space of init_task.  On SMP we
 	 * do this in smp.c:smp_callin for other cpus.
 	 */
-	atomic_inc(&init_mm.mm_count);
+	mmgrab(&init_mm);
 	current->active_mm = &init_mm;
 }

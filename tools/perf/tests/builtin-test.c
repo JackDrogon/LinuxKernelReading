@@ -3,8 +3,10 @@
  *
  * Builtin regression testing command: ever growing number of sanity tests
  */
+#include <errno.h>
 #include <unistd.h>
 #include <string.h>
+#include <sys/wait.h>
 #include "builtin.h"
 #include "hist.h"
 #include "intlist.h"
@@ -13,6 +15,7 @@
 #include "color.h"
 #include <subcmd/parse-options.h>
 #include "symbol.h"
+#include <linux/kernel.h>
 
 static bool dont_fork;
 
@@ -42,6 +45,10 @@ static struct test generic_tests[] = {
 	{
 		.desc = "Parse event definition strings",
 		.func = test__parse_events,
+	},
+	{
+		.desc = "Simple expression parser",
+		.func = test__expr,
 	},
 	{
 		.desc = "PERF_RECORD_* events & perf_sample fields",
@@ -90,10 +97,12 @@ static struct test generic_tests[] = {
 	{
 		.desc = "Breakpoint overflow signal handler",
 		.func = test__bp_signal,
+		.is_supported = test__bp_signal_is_supported,
 	},
 	{
 		.desc = "Breakpoint overflow sampling",
 		.func = test__bp_signal_overflow,
+		.is_supported = test__bp_signal_is_supported,
 	},
 	{
 		.desc = "Number of exit events of a simple workload",
@@ -247,6 +256,10 @@ static struct test generic_tests[] = {
 		}
 	},
 	{
+		.desc = "unit_number__scnprintf",
+		.func = test__unit_number__scnprint,
+	},
+	{
 		.func = NULL,
 	},
 };
@@ -295,7 +308,7 @@ static int run_test(struct test *test, int subtest)
 		if (!dont_fork) {
 			pr_debug("test child forked, pid %d\n", getpid());
 
-			if (!verbose) {
+			if (verbose <= 0) {
 				int nullfd = open("/dev/null", O_WRONLY);
 
 				if (nullfd >= 0) {
@@ -390,6 +403,11 @@ static int __cmd_test(int argc, const char *argv[], struct intlist *skiplist)
 		if (!perf_test__matches(t, curr, argc, argv))
 			continue;
 
+		if (t->is_supported && !t->is_supported()) {
+			pr_debug("%2d: %-*s: Disabled\n", i, width, t->desc);
+			continue;
+		}
+
 		pr_info("%2d: %-*s:", i, width, t->desc);
 
 		if (intlist__find(skiplist, i)) {
@@ -456,7 +474,7 @@ static int perf_test__list(int argc, const char **argv)
 	return 0;
 }
 
-int cmd_test(int argc, const char **argv, const char *prefix __maybe_unused)
+int cmd_test(int argc, const char **argv)
 {
 	const char *test_usage[] = {
 	"perf test [<options>] [{list <test-name-fragment>|[<test-name-fragments>|<test-numbers>]}]",

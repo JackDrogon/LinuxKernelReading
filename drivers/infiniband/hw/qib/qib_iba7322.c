@@ -2053,7 +2053,7 @@ static void qib_7322_clear_freeze(struct qib_devdata *dd)
 			qib_write_kreg_port(dd->pport + pidx, krp_errmask,
 					    0ULL);
 
-	/* also disable interrupts; errormask is sometimes overwriten */
+	/* also disable interrupts; errormask is sometimes overwritten */
 	qib_7322_set_intr_state(dd, 0);
 
 	/* clear the freeze, and be sure chip saw it */
@@ -2893,7 +2893,6 @@ static void qib_setup_7322_cleanup(struct qib_devdata *dd)
 			dd->cspec->gpio_mask &= ~mask;
 			qib_write_kreg(dd, kr_gpio_mask, dd->cspec->gpio_mask);
 			spin_unlock_irqrestore(&dd->cspec->gpio_lock, flags);
-			qib_qsfp_deinit(&dd->pport[i].cpspec->qsfp_data);
 		}
 	}
 }
@@ -6612,9 +6611,8 @@ static int qib_init_7322_variables(struct qib_devdata *dd)
 		if (!qib_mini_init)
 			write_7322_init_portregs(ppd);
 
-		init_timer(&cp->chase_timer);
-		cp->chase_timer.function = reenable_chase;
-		cp->chase_timer.data = (unsigned long)ppd;
+		setup_timer(&cp->chase_timer, reenable_chase,
+			    (unsigned long)ppd);
 
 		ppd++;
 	}
@@ -6640,9 +6638,8 @@ static int qib_init_7322_variables(struct qib_devdata *dd)
 		(u64) rcv_int_count << IBA7322_HDRHEAD_PKTINT_SHIFT;
 
 	/* setup the stats timer; the add_timer is done at end of init */
-	init_timer(&dd->stats_timer);
-	dd->stats_timer.function = qib_get_7322_faststats;
-	dd->stats_timer.data = (unsigned long) dd;
+	setup_timer(&dd->stats_timer, qib_get_7322_faststats,
+		    (unsigned long)dd);
 
 	dd->ureg_align = 0x10000;  /* 64KB alignment */
 
@@ -7069,7 +7066,7 @@ static void qib_7322_txchk_change(struct qib_devdata *dd, u32 start,
 	unsigned long flags;
 
 	while (wait) {
-		unsigned long shadow;
+		unsigned long shadow = 0;
 		int cstart, previ = -1;
 
 		/*

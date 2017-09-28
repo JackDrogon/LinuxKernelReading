@@ -40,6 +40,7 @@
 #include <linux/parser.h>
 #include <linux/random.h>
 #include <linux/jiffies.h>
+#include <linux/lockdep.h>
 #include <rdma/ib_cache.h>
 
 #include <linux/atomic.h>
@@ -311,6 +312,11 @@ static int srp_new_cm_id(struct srp_rdma_ch *ch)
 	if (ch->cm_id)
 		ib_destroy_cm_id(ch->cm_id);
 	ch->cm_id = new_cm_id;
+	if (rdma_cap_opa_ah(target->srp_host->srp_dev->dev,
+			    target->srp_host->port))
+		ch->path.rec_type = SA_PATH_REC_TYPE_OPA;
+	else
+		ch->path.rec_type = SA_PATH_REC_TYPE_IB;
 	ch->path.sgid = target->sgid;
 	ch->path.dgid = target->orig_dgid;
 	ch->path.pkey = target->pkey;
@@ -465,9 +471,13 @@ static struct srp_fr_pool *srp_alloc_fr_pool(struct srp_target_port *target)
  * completion handler can access the queue pair while it is
  * being destroyed.
  */
-static void srp_destroy_qp(struct ib_qp *qp)
+static void srp_destroy_qp(struct srp_rdma_ch *ch, struct ib_qp *qp)
 {
-	ib_drain_rq(qp);
+	spin_lock_irq(&ch->lock);
+	ib_process_cq_direct(ch->send_cq, -1);
+	spin_unlock_irq(&ch->lock);
+
+	ib_drain_qp(qp);
 	ib_destroy_qp(qp);
 }
 
@@ -541,7 +551,7 @@ static int srp_create_ch_ib(struct srp_rdma_ch *ch)
 	}
 
 	if (ch->qp)
-		srp_destroy_qp(ch->qp);
+		srp_destroy_qp(ch, ch->qp);
 	if (ch->recv_cq)
 		ib_free_cq(ch->recv_cq);
 	if (ch->send_cq)
@@ -565,7 +575,7 @@ static int srp_create_ch_ib(struct srp_rdma_ch *ch)
 	return 0;
 
 err_qp:
-	srp_destroy_qp(qp);
+	ib_destroy_qp(qp);
 
 err_send_cq:
 	ib_free_cq(send_cq);
@@ -608,7 +618,7 @@ static void srp_free_ch_ib(struct srp_target_port *target,
 			ib_destroy_fmr_pool(ch->fmr_pool);
 	}
 
-	srp_destroy_qp(ch->qp);
+	srp_destroy_qp(ch, ch->qp);
 	ib_free_cq(ch->send_cq);
 	ib_free_cq(ch->recv_cq);
 
@@ -638,7 +648,7 @@ static void srp_free_ch_ib(struct srp_target_port *target,
 }
 
 static void srp_path_rec_completion(int status,
-				    struct ib_sa_path_rec *pathrec,
+				    struct sa_path_rec *pathrec,
 				    void *ch_ptr)
 {
 	struct srp_rdma_ch *ch = ch_ptr;
@@ -1799,6 +1809,8 @@ static struct srp_iu *__srp_get_tx_iu(struct srp_rdma_ch *ch,
 	s32 rsv = (iu_type == SRP_IU_TSK_MGMT) ? 0 : SRP_TSK_MGMT_SQ_SIZE;
 	struct srp_iu *iu;
 
+	lockdep_assert_held(&ch->lock);
+
 	ib_process_cq_direct(ch->send_cq, -1);
 
 	if (list_empty(&ch->free_tx))
@@ -1819,6 +1831,11 @@ static struct srp_iu *__srp_get_tx_iu(struct srp_rdma_ch *ch,
 	return iu;
 }
 
+/*
+ * Note: if this function is called from inside ib_drain_sq() then it will
+ * be called without ch->lock being held. If ib_drain_sq() dequeues a WQE
+ * with status IB_WC_SUCCESS then that's a bug.
+ */
 static void srp_send_done(struct ib_cq *cq, struct ib_wc *wc)
 {
 	struct srp_iu *iu = container_of(wc->wr_cqe, struct srp_iu, cqe);
@@ -1828,6 +1845,8 @@ static void srp_send_done(struct ib_cq *cq, struct ib_wc *wc)
 		srp_handle_qp_err(cq, wc, "SEND");
 		return;
 	}
+
+	lockdep_assert_held(&ch->lock);
 
 	list_add(&iu->list, &ch->free_tx);
 }
@@ -2385,12 +2404,12 @@ static void srp_cm_rej_handler(struct ib_cm_id *cm_id,
 	switch (event->param.rej_rcvd.reason) {
 	case IB_CM_REJ_PORT_CM_REDIRECT:
 		cpi = event->param.rej_rcvd.ari;
-		ch->path.dlid = cpi->redirect_lid;
+		sa_path_set_dlid(&ch->path, htonl(ntohs(cpi->redirect_lid)));
 		ch->path.pkey = cpi->redirect_pkey;
 		cm_id->remote_cm_qpn = be32_to_cpu(cpi->redirect_qp) & 0x00ffffff;
 		memcpy(ch->path.dgid.raw, cpi->redirect_gid, 16);
 
-		ch->status = ch->path.dlid ?
+		ch->status = sa_path_get_dlid(&ch->path) ?
 			SRP_DLID_REDIRECT : SRP_PORT_REDIRECT;
 		break;
 
@@ -2878,6 +2897,7 @@ static struct scsi_host_template srp_template = {
 	.info				= srp_target_info,
 	.queuecommand			= srp_queuecommand,
 	.change_queue_depth             = srp_change_queue_depth,
+	.eh_timed_out			= srp_timed_out,
 	.eh_abort_handler		= srp_abort,
 	.eh_device_reset_handler	= srp_reset_device,
 	.eh_host_reset_handler		= srp_reset_host,
@@ -2918,7 +2938,7 @@ static int srp_add_target(struct srp_host *host, struct srp_target_port *target)
 	sprintf(target->target_name, "SRP.T10:%016llX",
 		be64_to_cpu(target->id_ext));
 
-	if (scsi_add_host(target->scsi_host, host->srp_dev->dev->dma_device))
+	if (scsi_add_host(target->scsi_host, host->srp_dev->dev->dev.parent))
 		return -ENODEV;
 
 	memcpy(ids.port_id, &target->id_ext, 8);
@@ -3430,11 +3450,12 @@ static ssize_t srp_create_target(struct device *dev,
 			ret = srp_connect_ch(ch, multich);
 			if (ret) {
 				shost_printk(KERN_ERR, target->scsi_host,
-					     PFX "Connection %d/%d failed\n",
+					     PFX "Connection %d/%d to %pI6 failed\n",
 					     ch_start + cpu_idx,
-					     target->ch_count);
+					     target->ch_count,
+					     ch->target->orig_dgid.raw);
 				if (node_idx == 0 && cpu_idx == 0) {
-					goto err_disconnect;
+					goto free_ch;
 				} else {
 					srp_free_ch_ib(target, ch);
 					srp_free_req_data(target, ch);
@@ -3481,6 +3502,7 @@ put:
 err_disconnect:
 	srp_disconnect_target(target);
 
+free_ch:
 	for (i = 0; i < target->ch_count; i++) {
 		ch = &target->ch[i];
 		srp_free_ch_ib(target, ch);
@@ -3529,7 +3551,7 @@ static struct srp_host *srp_add_port(struct srp_device *device, u8 port)
 	host->port = port;
 
 	host->dev.class = &srp_class;
-	host->dev.parent = device->dev->dma_device;
+	host->dev.parent = device->dev->dev.parent;
 	dev_set_name(&host->dev, "srp-%s-%d", device->dev->name, port);
 
 	if (device_register(&host->dev))

@@ -17,6 +17,7 @@
 #include <linux/dlm.h>
 #include <linux/dlm_device.h>
 #include <linux/slab.h>
+#include <linux/sched/signal.h>
 
 #include "dlm_internal.h"
 #include "lockspace.h"
@@ -354,6 +355,10 @@ static int dlm_device_register(struct dlm_ls *ls, char *name)
 	error = misc_register(&ls->ls_device);
 	if (error) {
 		kfree(ls->ls_device.name);
+		/* this has to be set to NULL
+		 * to avoid a double-free in dlm_device_deregister
+		 */
+		ls->ls_device.name = NULL;
 	}
 fail:
 	return error;

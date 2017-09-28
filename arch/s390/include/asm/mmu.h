@@ -5,6 +5,7 @@
 #include <linux/errno.h>
 
 typedef struct {
+	spinlock_t lock;
 	cpumask_t cpu_attach_mask;
 	atomic_t flush_count;
 	unsigned int flush_mm;
@@ -22,9 +23,12 @@ typedef struct {
 	unsigned int has_pgste:1;
 	/* The mmu context uses storage keys. */
 	unsigned int use_skey:1;
+	/* The mmu context uses CMMA. */
+	unsigned int use_cmma:1;
 } mm_context_t;
 
 #define INIT_MM_CONTEXT(name)						   \
+	.context.lock =	__SPIN_LOCK_UNLOCKED(name.context.lock),	   \
 	.context.pgtable_lock =						   \
 			__SPIN_LOCK_UNLOCKED(name.context.pgtable_lock),   \
 	.context.pgtable_list = LIST_HEAD_INIT(name.context.pgtable_list), \

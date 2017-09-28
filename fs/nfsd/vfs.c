@@ -94,6 +94,12 @@ nfsd_cross_mnt(struct svc_rqst *rqstp, struct dentry **dpp,
 	err = follow_down(&path);
 	if (err < 0)
 		goto out;
+	if (path.mnt == exp->ex_path.mnt && path.dentry == dentry &&
+	    nfsd_mountpoint(dentry, exp) == 2) {
+		/* This is only a mountpoint in some other namespace */
+		path_put(&path);
+		goto out;
+	}
 
 	exp2 = rqst_exp_get_by_name(rqstp, &path);
 	if (IS_ERR(exp2)) {
@@ -167,16 +173,26 @@ static int nfsd_lookup_parent(struct svc_rqst *rqstp, struct dentry *dparent, st
 /*
  * For nfsd purposes, we treat V4ROOT exports as though there was an
  * export at *every* directory.
+ * We return:
+ * '1' if this dentry *must* be an export point,
+ * '2' if it might be, if there is really a mount here, and
+ * '0' if there is no chance of an export point here.
  */
 int nfsd_mountpoint(struct dentry *dentry, struct svc_export *exp)
 {
-	if (d_mountpoint(dentry))
+	if (!d_inode(dentry))
+		return 0;
+	if (exp->ex_flags & NFSEXP_V4ROOT)
 		return 1;
 	if (nfsd4_is_junction(dentry))
 		return 1;
-	if (!(exp->ex_flags & NFSEXP_V4ROOT))
-		return 0;
-	return d_inode(dentry) != NULL;
+	if (d_mountpoint(dentry))
+		/*
+		 * Might only be a mountpoint in a different namespace,
+		 * but we need to check.
+		 */
+		return 2;
+	return 0;
 }
 
 __be32
@@ -895,24 +911,13 @@ __be32 nfsd_splice_read(struct svc_rqst *rqstp,
 __be32 nfsd_readv(struct file *file, loff_t offset, struct kvec *vec, int vlen,
 		unsigned long *count)
 {
-	mm_segment_t oldfs;
+	struct iov_iter iter;
 	int host_err;
 
-	oldfs = get_fs();
-	set_fs(KERNEL_DS);
-	host_err = vfs_readv(file, (struct iovec __user *)vec, vlen, &offset, 0);
-	set_fs(oldfs);
-	return nfsd_finish_read(file, count, host_err);
-}
+	iov_iter_kvec(&iter, READ | ITER_KVEC, vec, vlen, *count);
+	host_err = vfs_iter_read(file, &iter, &offset, 0);
 
-static __be32
-nfsd_vfs_read(struct svc_rqst *rqstp, struct file *file,
-	      loff_t offset, struct kvec *vec, int vlen, unsigned long *count)
-{
-	if (file->f_op->splice_read && test_bit(RQ_SPLICE_OK, &rqstp->rq_flags))
-		return nfsd_splice_read(rqstp, file, offset, count);
-	else
-		return nfsd_readv(file, offset, vec, vlen, count);
+	return nfsd_finish_read(file, count, host_err);
 }
 
 /*
@@ -955,14 +960,12 @@ static int wait_for_concurrent_writes(struct file *file)
 __be32
 nfsd_vfs_write(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
 				loff_t offset, struct kvec *vec, int vlen,
-				unsigned long *cnt, int *stablep)
+				unsigned long *cnt, int stable)
 {
 	struct svc_export	*exp;
-	struct inode		*inode;
-	mm_segment_t		oldfs;
+	struct iov_iter		iter;
 	__be32			err = 0;
 	int			host_err;
-	int			stable = *stablep;
 	int			use_wgather;
 	loff_t			pos = offset;
 	unsigned int		pflags = current->flags;
@@ -977,21 +980,17 @@ nfsd_vfs_write(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
 		 */
 		current->flags |= PF_LESS_THROTTLE;
 
-	inode = file_inode(file);
-	exp   = fhp->fh_export;
-
+	exp = fhp->fh_export;
 	use_wgather = (rqstp->rq_vers == 2) && EX_WGATHER(exp);
 
 	if (!EX_ISSYNC(exp))
-		stable = 0;
+		stable = NFS_UNSTABLE;
 
 	if (stable && !use_wgather)
 		flags |= RWF_SYNC;
 
-	/* Write the data. */
-	oldfs = get_fs(); set_fs(KERNEL_DS);
-	host_err = vfs_writev(file, (struct iovec __user *)vec, vlen, &pos, flags);
-	set_fs(oldfs);
+	iov_iter_kvec(&iter, WRITE | ITER_KVEC, vec, vlen, *cnt);
+	host_err = vfs_iter_write(file, &iter, &pos, flags);
 	if (host_err < 0)
 		goto out_nfserr;
 	*cnt = host_err;
@@ -1008,7 +1007,7 @@ out_nfserr:
 	else
 		err = nfserrno(host_err);
 	if (test_bit(RQ_LOCAL, &rqstp->rq_flags))
-		tsk_restore_flags(current, pflags, PF_LESS_THROTTLE);
+		current_restore_flags(pflags, PF_LESS_THROTTLE);
 	return err;
 }
 
@@ -1032,7 +1031,12 @@ __be32 nfsd_read(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	ra = nfsd_init_raparms(file);
 
 	trace_read_opened(rqstp, fhp, offset, vlen);
-	err = nfsd_vfs_read(rqstp, file, offset, vec, vlen, count);
+
+	if (file->f_op->splice_read && test_bit(RQ_SPLICE_OK, &rqstp->rq_flags))
+		err = nfsd_splice_read(rqstp, file, offset, count);
+	else
+		err = nfsd_readv(file, offset, vec, vlen, count);
+
 	trace_read_io_done(rqstp, fhp, offset, vlen);
 
 	if (ra)
@@ -1050,35 +1054,22 @@ __be32 nfsd_read(struct svc_rqst *rqstp, struct svc_fh *fhp,
  * N.B. After this call fhp needs an fh_put
  */
 __be32
-nfsd_write(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
-		loff_t offset, struct kvec *vec, int vlen, unsigned long *cnt,
-		int *stablep)
+nfsd_write(struct svc_rqst *rqstp, struct svc_fh *fhp, loff_t offset,
+	   struct kvec *vec, int vlen, unsigned long *cnt, int stable)
 {
-	__be32			err = 0;
+	struct file *file = NULL;
+	__be32 err = 0;
 
 	trace_write_start(rqstp, fhp, offset, vlen);
 
-	if (file) {
-		err = nfsd_permission(rqstp, fhp->fh_export, fhp->fh_dentry,
-				NFSD_MAY_WRITE|NFSD_MAY_OWNER_OVERRIDE);
-		if (err)
-			goto out;
-		trace_write_opened(rqstp, fhp, offset, vlen);
-		err = nfsd_vfs_write(rqstp, fhp, file, offset, vec, vlen, cnt,
-				stablep);
-		trace_write_io_done(rqstp, fhp, offset, vlen);
-	} else {
-		err = nfsd_open(rqstp, fhp, S_IFREG, NFSD_MAY_WRITE, &file);
-		if (err)
-			goto out;
+	err = nfsd_open(rqstp, fhp, S_IFREG, NFSD_MAY_WRITE, &file);
+	if (err)
+		goto out;
 
-		trace_write_opened(rqstp, fhp, offset, vlen);
-		if (cnt)
-			err = nfsd_vfs_write(rqstp, fhp, file, offset, vec, vlen,
-					     cnt, stablep);
-		trace_write_io_done(rqstp, fhp, offset, vlen);
-		fput(file);
-	}
+	trace_write_opened(rqstp, fhp, offset, vlen);
+	err = nfsd_vfs_write(rqstp, fhp, file, offset, vec, vlen, cnt, stable);
+	trace_write_io_done(rqstp, fhp, offset, vlen);
+	fput(file);
 out:
 	trace_write_done(rqstp, fhp, offset, vlen);
 	return err;
@@ -1465,41 +1456,34 @@ do_nfsd_create(struct svc_rqst *rqstp, struct svc_fh *fhp,
 __be32
 nfsd_readlink(struct svc_rqst *rqstp, struct svc_fh *fhp, char *buf, int *lenp)
 {
-	mm_segment_t	oldfs;
 	__be32		err;
-	int		host_err;
+	const char *link;
 	struct path path;
+	DEFINE_DELAYED_CALL(done);
+	int len;
 
 	err = fh_verify(rqstp, fhp, S_IFLNK, NFSD_MAY_NOP);
-	if (err)
-		goto out;
+	if (unlikely(err))
+		return err;
 
 	path.mnt = fhp->fh_export->ex_path.mnt;
 	path.dentry = fhp->fh_dentry;
 
-	err = nfserr_inval;
-	if (!d_is_symlink(path.dentry))
-		goto out;
+	if (unlikely(!d_is_symlink(path.dentry)))
+		return nfserr_inval;
 
 	touch_atime(&path);
-	/* N.B. Why does this call need a get_fs()??
-	 * Remove the set_fs and watch the fireworks:-) --okir
-	 */
 
-	oldfs = get_fs(); set_fs(KERNEL_DS);
-	host_err = vfs_readlink(path.dentry, (char __user *)buf, *lenp);
-	set_fs(oldfs);
+	link = vfs_get_link(path.dentry, &done);
+	if (IS_ERR(link))
+		return nfserrno(PTR_ERR(link));
 
-	if (host_err < 0)
-		goto out_nfserr;
-	*lenp = host_err;
-	err = 0;
-out:
-	return err;
-
-out_nfserr:
-	err = nfserrno(host_err);
-	goto out;
+	len = strlen(link);
+	if (len < *lenp)
+		*lenp = len;
+	memcpy(buf, link, *lenp);
+	do_delayed_call(&done);
+	return 0;
 }
 
 /*

@@ -66,7 +66,7 @@ static int alt_hps2fpga_enable_show(struct fpga_bridge *bridge)
 
 /* The L3 REMAP register is write only, so keep a cached value. */
 static unsigned int l3_remap_shadow;
-static spinlock_t l3_remap_lock;
+static DEFINE_SPINLOCK(l3_remap_lock);
 
 static int _alt_hps2fpga_enable_set(struct altera_hps2fpga_data *priv,
 				    bool enable)
@@ -171,8 +171,6 @@ static int alt_fpga_bridge_probe(struct platform_device *pdev)
 		return -EBUSY;
 	}
 
-	spin_lock_init(&l3_remap_lock);
-
 	if (!of_property_read_u32(dev->of_node, "bridge-enable", &enable)) {
 		if (enable > 1) {
 			dev_warn(dev, "invalid bridge-enable %u > 1\n", enable);
@@ -181,15 +179,18 @@ static int alt_fpga_bridge_probe(struct platform_device *pdev)
 				 (enable ? "enabling" : "disabling"));
 
 			ret = _alt_hps2fpga_enable_set(priv, enable);
-			if (ret) {
-				fpga_bridge_unregister(&pdev->dev);
-				return ret;
-			}
+			if (ret)
+				goto err;
 		}
 	}
 
-	return fpga_bridge_register(dev, priv->name, &altera_hps2fpga_br_ops,
-				    priv);
+	ret = fpga_bridge_register(dev, priv->name, &altera_hps2fpga_br_ops,
+				   priv);
+err:
+	if (ret)
+		clk_disable_unprepare(priv->clk);
+
+	return ret;
 }
 
 static int alt_fpga_bridge_remove(struct platform_device *pdev)

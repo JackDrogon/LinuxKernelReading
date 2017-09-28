@@ -17,11 +17,11 @@
 #include <linux/seq_file.h>
 #include <linux/kernfs.h>
 #include <linux/jump_label.h>
-#include <linux/nsproxy.h>
 #include <linux/types.h>
 #include <linux/ns_common.h>
 #include <linux/nsproxy.h>
 #include <linux/user_namespace.h>
+#include <linux/refcount.h>
 
 #include <linux/cgroup-defs.h>
 
@@ -266,7 +266,7 @@ void css_task_iter_end(struct css_task_iter *it);
  * cgroup_taskset_for_each_leader - iterate group leaders in a cgroup_taskset
  * @leader: the loop cursor
  * @dst_css: the destination css
- * @tset: takset to iterate
+ * @tset: taskset to iterate
  *
  * Iterate threadgroup leaders of @tset.  For single-task migrations, @tset
  * may not contain any.
@@ -341,6 +341,26 @@ static inline bool css_tryget_online(struct cgroup_subsys_state *css)
 	if (!(css->flags & CSS_NO_REF))
 		return percpu_ref_tryget_live(&css->refcnt);
 	return true;
+}
+
+/**
+ * css_is_dying - test whether the specified css is dying
+ * @css: target css
+ *
+ * Test whether @css is in the process of offlining or already offline.  In
+ * most cases, ->css_online() and ->css_offline() callbacks should be
+ * enough; however, the actual offline operations are RCU delayed and this
+ * test returns %true also when @css is scheduled to be offlined.
+ *
+ * This is useful, for example, when the use case requires synchronous
+ * behavior with respect to cgroup removal.  cgroup removal schedules css
+ * offlining but the css can seem alive while the operation is being
+ * delayed.  If the delay affects user visible semantics, this test can be
+ * used to resolve the situation.
+ */
+static inline bool css_is_dying(struct cgroup_subsys_state *css)
+{
+	return !(css->flags & CSS_NO_REF) && percpu_ref_is_dying(&css->refcnt);
 }
 
 /**
@@ -661,7 +681,7 @@ static inline void cgroup_sk_free(struct sock_cgroup_data *skcd) {}
 #endif	/* CONFIG_CGROUP_DATA */
 
 struct cgroup_namespace {
-	atomic_t		count;
+	refcount_t		count;
 	struct ns_common	ns;
 	struct user_namespace	*user_ns;
 	struct ucounts		*ucounts;
@@ -696,12 +716,12 @@ copy_cgroup_ns(unsigned long flags, struct user_namespace *user_ns,
 static inline void get_cgroup_ns(struct cgroup_namespace *ns)
 {
 	if (ns)
-		atomic_inc(&ns->count);
+		refcount_inc(&ns->count);
 }
 
 static inline void put_cgroup_ns(struct cgroup_namespace *ns)
 {
-	if (ns && atomic_dec_and_test(&ns->count))
+	if (ns && refcount_dec_and_test(&ns->count))
 		free_cgroup_ns(ns);
 }
 

@@ -56,12 +56,14 @@ struct msm_kms_funcs {
 			struct drm_encoder *encoder,
 			struct drm_encoder *slave_encoder,
 			bool is_cmd_mode);
+	void (*set_encoder_mode)(struct msm_kms *kms,
+				 struct drm_encoder *encoder,
+				 bool cmd_mode);
 	/* cleanup: */
 	void (*destroy)(struct msm_kms *kms);
 #ifdef CONFIG_DEBUG_FS
 	/* debugfs: */
 	int (*debugfs_init)(struct msm_kms *kms, struct drm_minor *minor);
-	void (*debugfs_cleanup)(struct msm_kms *kms, struct drm_minor *minor);
 #endif
 };
 
@@ -70,6 +72,9 @@ struct msm_kms {
 
 	/* irq number to be passed on to drm_irq_install */
 	int irq;
+
+	/* mapper-id used to request GEM buffer mapped for scanout: */
+	struct msm_gem_address_space *aspace;
 };
 
 /**

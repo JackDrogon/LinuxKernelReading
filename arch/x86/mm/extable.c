@@ -1,5 +1,7 @@
 #include <linux/extable.h>
 #include <linux/uaccess.h>
+#include <linux/sched/debug.h>
+
 #include <asm/traps.h>
 #include <asm/kdebug.h>
 
@@ -158,6 +160,9 @@ void __init early_fixup_exception(struct pt_regs *regs, int trapnr)
 	 * fage faults, for example, are special.
 	 */
 	if (fixup_exception(regs, trapnr))
+		return;
+
+	if (fixup_bug(regs, trapnr))
 		return;
 
 fail:

@@ -56,6 +56,7 @@ static int mall_replace_hw_filter(struct tcf_proto *tp,
 	struct net_device *dev = tp->q->dev_queue->dev;
 	struct tc_to_netdev offload;
 	struct tc_cls_matchall_offload mall_offload = {0};
+	int err;
 
 	offload.type = TC_SETUP_MATCHALL;
 	offload.cls_mall = &mall_offload;
@@ -63,8 +64,13 @@ static int mall_replace_hw_filter(struct tcf_proto *tp,
 	offload.cls_mall->exts = &head->exts;
 	offload.cls_mall->cookie = cookie;
 
-	return dev->netdev_ops->ndo_setup_tc(dev, tp->q->handle, tp->protocol,
-					     &offload);
+	err = dev->netdev_ops->ndo_setup_tc(dev, tp->q->handle,
+					    tp->chain->index,
+					    tp->protocol, &offload);
+	if (!err)
+		head->flags |= TCA_CLS_FLAGS_IN_HW;
+
+	return err;
 }
 
 static void mall_destroy_hw_filter(struct tcf_proto *tp,
@@ -81,23 +87,22 @@ static void mall_destroy_hw_filter(struct tcf_proto *tp,
 	offload.cls_mall->exts = NULL;
 	offload.cls_mall->cookie = cookie;
 
-	dev->netdev_ops->ndo_setup_tc(dev, tp->q->handle, tp->protocol,
-					     &offload);
+	dev->netdev_ops->ndo_setup_tc(dev, tp->q->handle, tp->chain->index,
+				      tp->protocol, &offload);
 }
 
-static bool mall_destroy(struct tcf_proto *tp, bool force)
+static void mall_destroy(struct tcf_proto *tp)
 {
 	struct cls_mall_head *head = rtnl_dereference(tp->root);
 	struct net_device *dev = tp->q->dev_queue->dev;
 
 	if (!head)
-		return true;
+		return;
 
 	if (tc_should_offload(dev, tp, head->flags))
 		mall_destroy_hw_filter(tp, head, (unsigned long) head);
 
 	call_rcu(&head->rcu, mall_destroy_rcu);
-	return true;
 }
 
 static unsigned long mall_get(struct tcf_proto *tp, u32 handle)
@@ -118,10 +123,12 @@ static int mall_set_parms(struct net *net, struct tcf_proto *tp,
 	struct tcf_exts e;
 	int err;
 
-	tcf_exts_init(&e, TCA_MATCHALL_ACT, 0);
+	err = tcf_exts_init(&e, TCA_MATCHALL_ACT, 0);
+	if (err)
+		return err;
 	err = tcf_exts_validate(net, tp, tb, est, &e, ovr);
 	if (err < 0)
-		return err;
+		goto errout;
 
 	if (tb[TCA_MATCHALL_CLASSID]) {
 		head->res.classid = nla_get_u32(tb[TCA_MATCHALL_CLASSID]);
@@ -131,6 +138,9 @@ static int mall_set_parms(struct net *net, struct tcf_proto *tp,
 	tcf_exts_change(tp, &head->exts, &e);
 
 	return 0;
+errout:
+	tcf_exts_destroy(&e);
+	return err;
 }
 
 static int mall_change(struct net *net, struct sk_buff *in_skb,
@@ -151,8 +161,8 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 	if (head)
 		return -EEXIST;
 
-	err = nla_parse_nested(tb, TCA_MATCHALL_MAX,
-			       tca[TCA_OPTIONS], mall_policy);
+	err = nla_parse_nested(tb, TCA_MATCHALL_MAX, tca[TCA_OPTIONS],
+			       mall_policy, NULL);
 	if (err < 0)
 		return err;
 
@@ -166,7 +176,9 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 	if (!new)
 		return -ENOBUFS;
 
-	tcf_exts_init(&new->exts, TCA_MATCHALL_ACT, 0);
+	err = tcf_exts_init(&new->exts, TCA_MATCHALL_ACT, 0);
+	if (err)
+		goto err_exts_init;
 
 	if (!handle)
 		handle = 1;
@@ -175,30 +187,34 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 
 	err = mall_set_parms(net, tp, new, base, tb, tca[TCA_RATE], ovr);
 	if (err)
-		goto errout;
+		goto err_set_parms;
 
 	if (tc_should_offload(dev, tp, flags)) {
 		err = mall_replace_hw_filter(tp, new, (unsigned long) new);
 		if (err) {
 			if (tc_skip_sw(flags))
-				goto errout;
+				goto err_replace_hw_filter;
 			else
 				err = 0;
 		}
 	}
 
+	if (!tc_in_hw(new->flags))
+		new->flags |= TCA_CLS_FLAGS_NOT_IN_HW;
+
 	*arg = (unsigned long) head;
 	rcu_assign_pointer(tp->root, new);
-	if (head)
-		call_rcu(&head->rcu, mall_destroy_rcu);
 	return 0;
 
-errout:
+err_replace_hw_filter:
+err_set_parms:
+	tcf_exts_destroy(&new->exts);
+err_exts_init:
 	kfree(new);
 	return err;
 }
 
-static int mall_delete(struct tcf_proto *tp, unsigned long arg)
+static int mall_delete(struct tcf_proto *tp, unsigned long arg, bool *last)
 {
 	return -EOPNOTSUPP;
 }
@@ -232,6 +248,9 @@ static int mall_dump(struct net *net, struct tcf_proto *tp, unsigned long fh,
 
 	if (head->res.classid &&
 	    nla_put_u32(skb, TCA_MATCHALL_CLASSID, head->res.classid))
+		goto nla_put_failure;
+
+	if (head->flags && nla_put_u32(skb, TCA_MATCHALL_FLAGS, head->flags))
 		goto nla_put_failure;
 
 	if (tcf_exts_dump(skb, &head->exts))

@@ -145,7 +145,7 @@ int rt2x00usb_regbusy_read(struct rt2x00_dev *rt2x00dev,
 		return -ENODEV;
 
 	for (i = 0; i < REGISTER_USB_BUSY_COUNT; i++) {
-		rt2x00usb_register_read_lock(rt2x00dev, offset, reg);
+		*reg = rt2x00usb_register_read_lock(rt2x00dev, offset);
 		if (!rt2x00_get_field32(*reg, field))
 			return 1;
 		udelay(REGISTER_BUSY_DELAY);
@@ -513,7 +513,7 @@ void rt2x00usb_flush_queue(struct data_queue *queue, bool drop)
 		 * Wait for a little while to give the driver
 		 * the oppurtunity to recover itself.
 		 */
-		msleep(10);
+		msleep(50);
 	}
 }
 EXPORT_SYMBOL_GPL(rt2x00usb_flush_queue);
@@ -739,6 +739,11 @@ EXPORT_SYMBOL_GPL(rt2x00usb_initialize);
 void rt2x00usb_uninitialize(struct rt2x00_dev *rt2x00dev)
 {
 	struct data_queue *queue;
+
+	usb_kill_anchored_urbs(rt2x00dev->anchor);
+	hrtimer_cancel(&rt2x00dev->txstatus_timer);
+	cancel_work_sync(&rt2x00dev->rxdone_work);
+	cancel_work_sync(&rt2x00dev->txdone_work);
 
 	queue_for_each(rt2x00dev, queue)
 		rt2x00usb_free_entries(queue);

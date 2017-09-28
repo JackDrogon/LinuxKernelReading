@@ -18,6 +18,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/crypto.h>
+#include <linux/compiler.h>
 #include <linux/vmalloc.h>
 #include <crypto/algapi.h>
 #include <linux/cryptouser.h>
@@ -57,7 +58,7 @@ static int crypto_scomp_report(struct sk_buff *skb, struct crypto_alg *alg)
 #endif
 
 static void crypto_scomp_show(struct seq_file *m, struct crypto_alg *alg)
-	__attribute__ ((unused));
+	__maybe_unused;
 
 static void crypto_scomp_show(struct seq_file *m, struct crypto_alg *alg)
 {
@@ -210,9 +211,7 @@ static int scomp_acomp_comp_decomp(struct acomp_req *req, int dir)
 					      scratch_dst, &req->dlen, *ctx);
 	if (!ret) {
 		if (!req->dst) {
-			req->dst = crypto_scomp_sg_alloc(req->dlen,
-				   req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP ?
-				   GFP_KERNEL : GFP_ATOMIC);
+			req->dst = crypto_scomp_sg_alloc(req->dlen, GFP_ATOMIC);
 			if (!req->dst)
 				goto out;
 		}
@@ -351,6 +350,35 @@ int crypto_unregister_scomp(struct scomp_alg *alg)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(crypto_unregister_scomp);
+
+int crypto_register_scomps(struct scomp_alg *algs, int count)
+{
+	int i, ret;
+
+	for (i = 0; i < count; i++) {
+		ret = crypto_register_scomp(&algs[i]);
+		if (ret)
+			goto err;
+	}
+
+	return 0;
+
+err:
+	for (--i; i >= 0; --i)
+		crypto_unregister_scomp(&algs[i]);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(crypto_register_scomps);
+
+void crypto_unregister_scomps(struct scomp_alg *algs, int count)
+{
+	int i;
+
+	for (i = count - 1; i >= 0; --i)
+		crypto_unregister_scomp(&algs[i]);
+}
+EXPORT_SYMBOL_GPL(crypto_unregister_scomps);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Synchronous compression type");

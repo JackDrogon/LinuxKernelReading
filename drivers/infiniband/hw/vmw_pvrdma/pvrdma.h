@@ -69,6 +69,9 @@
  */
 #define PCI_DEVICE_ID_VMWARE_PVRDMA	0x0820
 
+#define PVRDMA_NUM_RING_PAGES		4
+#define PVRDMA_QP_NUM_HEADER_PAGES	1
+
 struct pvrdma_dev;
 
 struct pvrdma_page_dir {
@@ -196,13 +199,7 @@ struct pvrdma_dev {
 	spinlock_t cmd_lock; /* Command lock. */
 	struct semaphore cmd_sema;
 	struct completion cmd_done;
-	struct {
-		enum pvrdma_intr_type type; /* Intr type */
-		struct msix_entry msix_entry[PVRDMA_MAX_INTERRUPTS];
-		irq_handler_t handler[PVRDMA_MAX_INTERRUPTS];
-		u8 enabled[PVRDMA_MAX_INTERRUPTS];
-		u8 size;
-	} intr;
+	unsigned int nr_vectors;
 
 	/* RDMA-related device information. */
 	union ib_gid *sgid_tbl;
@@ -443,10 +440,10 @@ void pvrdma_global_route_to_ib(struct ib_global_route *dst,
 			       const struct pvrdma_global_route *src);
 void ib_global_route_to_pvrdma(struct pvrdma_global_route *dst,
 			       const struct ib_global_route *src);
-void pvrdma_ah_attr_to_ib(struct ib_ah_attr *dst,
-			  const struct pvrdma_ah_attr *src);
-void ib_ah_attr_to_pvrdma(struct pvrdma_ah_attr *dst,
-			  const struct ib_ah_attr *src);
+void pvrdma_ah_attr_to_rdma(struct rdma_ah_attr *dst,
+			    const struct pvrdma_ah_attr *src);
+void rdma_ah_attr_to_pvrdma(struct pvrdma_ah_attr *dst,
+			    const struct rdma_ah_attr *src);
 
 int pvrdma_uar_table_init(struct pvrdma_dev *dev);
 void pvrdma_uar_table_cleanup(struct pvrdma_dev *dev);

@@ -69,7 +69,7 @@
     (((TLP_REQ_ID(pcie->root_bus_nr,  RP_DEVFN)) << 16) | (tag << 8) | (be))
 #define TLP_CFG_DW2(bus, devfn, offset)	\
 				(((bus) << 24) | ((devfn) << 16) | (offset))
-#define TLP_COMP_STATUS(s)		(((s) >> 12) & 7)
+#define TLP_COMP_STATUS(s)		(((s) >> 13) & 7)
 #define TLP_HDR_SIZE			3
 #define TLP_LOOP			500
 
@@ -579,12 +579,14 @@ static int altera_pcie_probe(struct platform_device *pdev)
 	struct altera_pcie *pcie;
 	struct pci_bus *bus;
 	struct pci_bus *child;
+	struct pci_host_bridge *bridge;
 	int ret;
 
-	pcie = devm_kzalloc(dev, sizeof(*pcie), GFP_KERNEL);
-	if (!pcie)
+	bridge = devm_pci_alloc_host_bridge(dev, sizeof(*pcie));
+	if (!bridge)
 		return -ENOMEM;
 
+	pcie = pci_host_bridge_priv(bridge);
 	pcie->pdev = pdev;
 
 	ret = altera_pcie_parse_dt(pcie);
@@ -613,12 +615,20 @@ static int altera_pcie_probe(struct platform_device *pdev)
 	cra_writel(pcie, P2A_INT_ENA_ALL, P2A_INT_ENABLE);
 	altera_pcie_host_init(pcie);
 
-	bus = pci_scan_root_bus(dev, pcie->root_bus_nr, &altera_pcie_ops,
-				pcie, &pcie->resources);
-	if (!bus)
-		return -ENOMEM;
+	list_splice_init(&pcie->resources, &bridge->windows);
+	bridge->dev.parent = dev;
+	bridge->sysdata = pcie;
+	bridge->busnr = pcie->root_bus_nr;
+	bridge->ops = &altera_pcie_ops;
+	bridge->map_irq = of_irq_parse_and_map_pci;
+	bridge->swizzle_irq = pci_common_swizzle;
 
-	pci_fixup_irqs(pci_common_swizzle, of_irq_parse_and_map_pci);
+	ret = pci_scan_root_bus_bridge(bridge);
+	if (ret < 0)
+		return ret;
+
+	bus = bridge->bus;
+
 	pci_assign_unassigned_bus_resources(bus);
 
 	/* Configure PCI Express setting. */
