@@ -50,7 +50,7 @@ typedef struct xfs_log_item {
 	uint				li_type;	/* item type */
 	uint				li_flags;	/* misc flags */
 	struct xfs_buf			*li_buf;	/* real buffer pointer */
-	struct xfs_log_item		*li_bio_list;	/* buffer item list */
+	struct list_head		li_bio_list;	/* buffer item list */
 	void				(*li_cb)(struct xfs_buf *,
 						 struct xfs_log_item *);
 							/* buffer item iodone */
@@ -230,7 +230,8 @@ int		xfs_trans_free_extent(struct xfs_trans *,
 				      struct xfs_efd_log_item *, xfs_fsblock_t,
 				      xfs_extlen_t, struct xfs_owner_info *);
 int		xfs_trans_commit(struct xfs_trans *);
-int		xfs_trans_roll(struct xfs_trans **, struct xfs_inode *);
+int		xfs_trans_roll(struct xfs_trans **);
+int		xfs_trans_roll_inode(struct xfs_trans **, struct xfs_inode *);
 void		xfs_trans_cancel(xfs_trans_t *);
 int		xfs_trans_ail_init(struct xfs_mount *);
 void		xfs_trans_ail_destroy(struct xfs_mount *);

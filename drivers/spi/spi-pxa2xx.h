@@ -38,7 +38,7 @@ struct driver_data {
 
 	/* SSP register addresses */
 	void __iomem *ioaddr;
-	u32 ssdr_physical;
+	phys_addr_t ssdr_physical;
 
 	/* SSP masks*/
 	u32 dma_cr1;
@@ -83,7 +83,7 @@ struct chip_data {
 	u16 lpss_tx_threshold;
 	u8 enable_dma;
 	union {
-		int gpio_cs;
+		struct gpio_desc *gpiod_cs;
 		unsigned int frm;
 	};
 	int gpio_cs_inverted;

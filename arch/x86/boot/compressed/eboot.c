@@ -163,7 +163,8 @@ __setup_efi_pci32(efi_pci_io_protocol_32 *pci, struct pci_setup_rom **__rom)
 	if (status != EFI_SUCCESS)
 		goto free_struct;
 
-	memcpy(rom->romdata, pci->romimage, pci->romsize);
+	memcpy(rom->romdata, (void *)(unsigned long)pci->romimage,
+	       pci->romsize);
 	return status;
 
 free_struct:
@@ -269,7 +270,8 @@ __setup_efi_pci64(efi_pci_io_protocol_64 *pci, struct pci_setup_rom **__rom)
 	if (status != EFI_SUCCESS)
 		goto free_struct;
 
-	memcpy(rom->romdata, pci->romimage, pci->romsize);
+	memcpy(rom->romdata, (void *)(unsigned long)pci->romimage,
+	       pci->romsize);
 	return status;
 
 free_struct:
@@ -439,7 +441,7 @@ setup_uga32(void **uga_handle, unsigned long size, u32 *width, u32 *height)
 	struct efi_uga_draw_protocol *uga = NULL, *first_uga;
 	efi_guid_t uga_proto = EFI_UGA_PROTOCOL_GUID;
 	unsigned long nr_ugas;
-	u32 *handles = (u32 *)uga_handle;;
+	u32 *handles = (u32 *)uga_handle;
 	efi_status_t status = EFI_INVALID_PARAMETER;
 	int i;
 
@@ -484,7 +486,7 @@ setup_uga64(void **uga_handle, unsigned long size, u32 *width, u32 *height)
 	struct efi_uga_draw_protocol *uga = NULL, *first_uga;
 	efi_guid_t uga_proto = EFI_UGA_PROTOCOL_GUID;
 	unsigned long nr_ugas;
-	u64 *handles = (u64 *)uga_handle;;
+	u64 *handles = (u64 *)uga_handle;
 	efi_status_t status = EFI_INVALID_PARAMETER;
 	int i;
 
@@ -767,7 +769,7 @@ static efi_status_t setup_e820(struct boot_params *params,
 		m |= (u64)efi->efi_memmap_hi << 32;
 #endif
 
-		d = (efi_memory_desc_t *)(m + (i * efi->efi_memdesc_size));
+		d = efi_early_memdesc_ptr(m, efi->efi_memdesc_size, i);
 		switch (d->type) {
 		case EFI_RESERVED_TYPE:
 		case EFI_RUNTIME_SERVICES_CODE:
@@ -997,6 +999,10 @@ struct boot_params *efi_main(struct efi_config *c,
 	if (boot_params->secure_boot == efi_secureboot_mode_unset)
 		boot_params->secure_boot = efi_get_secureboot(sys_table);
 
+	/* Ask the firmware to clear memory on unclean shutdown */
+	efi_enable_reset_attack_mitigation(sys_table);
+	efi_retrieve_tpm2_eventlog(sys_table);
+
 	setup_graphics(boot_params);
 
 	setup_efi_pci(boot_params);
@@ -1058,7 +1064,7 @@ struct boot_params *efi_main(struct efi_config *c,
 		desc->s = DESC_TYPE_CODE_DATA;
 		desc->dpl = 0;
 		desc->p = 1;
-		desc->limit = 0xf;
+		desc->limit1 = 0xf;
 		desc->avl = 0;
 		desc->l = 0;
 		desc->d = SEG_OP_SIZE_32BIT;
@@ -1078,7 +1084,7 @@ struct boot_params *efi_main(struct efi_config *c,
 	desc->s = DESC_TYPE_CODE_DATA;
 	desc->dpl = 0;
 	desc->p = 1;
-	desc->limit = 0xf;
+	desc->limit1 = 0xf;
 	desc->avl = 0;
 	if (IS_ENABLED(CONFIG_X86_64)) {
 		desc->l = 1;
@@ -1099,7 +1105,7 @@ struct boot_params *efi_main(struct efi_config *c,
 	desc->s = DESC_TYPE_CODE_DATA;
 	desc->dpl = 0;
 	desc->p = 1;
-	desc->limit = 0xf;
+	desc->limit1 = 0xf;
 	desc->avl = 0;
 	desc->l = 0;
 	desc->d = SEG_OP_SIZE_32BIT;
@@ -1116,7 +1122,7 @@ struct boot_params *efi_main(struct efi_config *c,
 		desc->s = 0;
 		desc->dpl = 0;
 		desc->p = 1;
-		desc->limit = 0x0;
+		desc->limit1 = 0x0;
 		desc->avl = 0;
 		desc->l = 0;
 		desc->d = 0;

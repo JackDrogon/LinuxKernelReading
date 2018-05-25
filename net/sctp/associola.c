@@ -63,11 +63,11 @@ static void sctp_assoc_free_asconf_queue(struct sctp_association *asoc);
 /* 1st Level Abstractions. */
 
 /* Initialize a new association from provided memory. */
-static struct sctp_association *sctp_association_init(struct sctp_association *asoc,
-					  const struct sctp_endpoint *ep,
-					  const struct sock *sk,
-					  sctp_scope_t scope,
-					  gfp_t gfp)
+static struct sctp_association *sctp_association_init(
+					struct sctp_association *asoc,
+					const struct sctp_endpoint *ep,
+					const struct sock *sk,
+					enum sctp_scope scope, gfp_t gfp)
 {
 	struct net *net = sock_net(sk);
 	struct sctp_sock *sp;
@@ -149,8 +149,7 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 
 	/* Initializes the timers */
 	for (i = SCTP_EVENT_TIMEOUT_NONE; i < SCTP_NUM_TIMEOUT_TYPES; ++i)
-		setup_timer(&asoc->timers[i], sctp_timer_events[i],
-				(unsigned long)asoc);
+		timer_setup(&asoc->timers[i], sctp_timer_events[i], 0);
 
 	/* Pull default initialization values from the sock options.
 	 * Note: This assumes that the values have already been
@@ -301,9 +300,8 @@ fail_init:
 
 /* Allocate and initialize a new association */
 struct sctp_association *sctp_association_new(const struct sctp_endpoint *ep,
-					 const struct sock *sk,
-					 sctp_scope_t scope,
-					 gfp_t gfp)
+					      const struct sock *sk,
+					      enum sctp_scope scope, gfp_t gfp)
 {
 	struct sctp_association *asoc;
 
@@ -797,7 +795,7 @@ void sctp_assoc_del_nonprimary_peers(struct sctp_association *asoc,
  */
 void sctp_assoc_control_transport(struct sctp_association *asoc,
 				  struct sctp_transport *transport,
-				  sctp_transport_cmd_t command,
+				  enum sctp_transport_cmd command,
 				  sctp_sn_error_t error)
 {
 	struct sctp_ulpevent *event;
@@ -863,7 +861,7 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
 		event = sctp_ulpevent_make_peer_addr_change(asoc, &addr,
 					0, spc_state, error, GFP_ATOMIC);
 		if (event)
-			sctp_ulpq_tail_event(&asoc->ulpq, event);
+			asoc->stream.si->enqueue_event(&asoc->ulpq, event);
 	}
 
 	/* Select new active and retran paths. */
@@ -1022,12 +1020,13 @@ static void sctp_assoc_bh_rcv(struct work_struct *work)
 		container_of(work, struct sctp_association,
 			     base.inqueue.immediate);
 	struct net *net = sock_net(asoc->base.sk);
+	union sctp_subtype subtype;
 	struct sctp_endpoint *ep;
 	struct sctp_chunk *chunk;
 	struct sctp_inq *inqueue;
-	int state;
-	sctp_subtype_t subtype;
+	int first_time = 1;	/* is this the first time through the loop */
 	int error = 0;
+	int state;
 
 	/* The association should be held so we should be safe. */
 	ep = asoc->ep;
@@ -1038,6 +1037,30 @@ static void sctp_assoc_bh_rcv(struct work_struct *work)
 		state = asoc->state;
 		subtype = SCTP_ST_CHUNK(chunk->chunk_hdr->type);
 
+		/* If the first chunk in the packet is AUTH, do special
+		 * processing specified in Section 6.3 of SCTP-AUTH spec
+		 */
+		if (first_time && subtype.chunk == SCTP_CID_AUTH) {
+			struct sctp_chunkhdr *next_hdr;
+
+			next_hdr = sctp_inq_peek(inqueue);
+			if (!next_hdr)
+				goto normal;
+
+			/* If the next chunk is COOKIE-ECHO, skip the AUTH
+			 * chunk while saving a pointer to it so we can do
+			 * Authentication later (during cookie-echo
+			 * processing).
+			 */
+			if (next_hdr->type == SCTP_CID_COOKIE_ECHO) {
+				chunk->auth_chunk = skb_clone(chunk->skb,
+							      GFP_ATOMIC);
+				chunk->auth = 1;
+				continue;
+			}
+		}
+
+normal:
 		/* SCTP-AUTH, Section 6.3:
 		 *    The receiver has a list of chunk types which it expects
 		 *    to be received only after an AUTH-chunk.  This list has
@@ -1076,6 +1099,9 @@ static void sctp_assoc_bh_rcv(struct work_struct *work)
 		/* If there is an error on chunk, discard this packet. */
 		if (error && chunk)
 			chunk->pdiscard = 1;
+
+		if (first_time)
+			first_time = 0;
 	}
 	sctp_association_put(asoc);
 }
@@ -1564,7 +1590,7 @@ void sctp_assoc_rwnd_decrease(struct sctp_association *asoc, unsigned int len)
  * local endpoint and the remote peer.
  */
 int sctp_assoc_set_bind_addr_from_ep(struct sctp_association *asoc,
-				     sctp_scope_t scope, gfp_t gfp)
+				     enum sctp_scope scope, gfp_t gfp)
 {
 	int flags;
 

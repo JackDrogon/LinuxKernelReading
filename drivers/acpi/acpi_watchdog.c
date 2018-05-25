@@ -66,7 +66,7 @@ void __init acpi_watchdog_init(void)
 	for (i = 0; i < wdat->entries; i++) {
 		const struct acpi_generic_address *gas;
 		struct resource_entry *rentry;
-		struct resource res;
+		struct resource res = {};
 		bool found;
 
 		gas = &entries[i].register_region;
@@ -74,10 +74,10 @@ void __init acpi_watchdog_init(void)
 		res.start = gas->address;
 		if (gas->space_id == ACPI_ADR_SPACE_SYSTEM_MEMORY) {
 			res.flags = IORESOURCE_MEM;
-			res.end = res.start + ALIGN(gas->access_width, 4);
+			res.end = res.start + ALIGN(gas->access_width, 4) - 1;
 		} else if (gas->space_id == ACPI_ADR_SPACE_SYSTEM_IO) {
 			res.flags = IORESOURCE_IO;
-			res.end = res.start + gas->access_width;
+			res.end = res.start + gas->access_width - 1;
 		} else {
 			pr_warn("Unsupported address space: %u\n",
 				gas->space_id);

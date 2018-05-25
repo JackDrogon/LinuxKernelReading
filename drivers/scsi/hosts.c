@@ -315,10 +315,11 @@ static void scsi_host_dev_release(struct device *dev)
 {
 	struct Scsi_Host *shost = dev_to_shost(dev);
 	struct device *parent = dev->parent;
-	struct request_queue *q;
-	void *queuedata;
 
 	scsi_proc_hostdir_rm(shost->hostt);
+
+	/* Wait for functions invoked through call_rcu(&shost->rcu, ...) */
+	rcu_barrier();
 
 	if (shost->tmf_work_q)
 		destroy_workqueue(shost->tmf_work_q);
@@ -326,12 +327,6 @@ static void scsi_host_dev_release(struct device *dev)
 		kthread_stop(shost->ehandler);
 	if (shost->work_q)
 		destroy_workqueue(shost->work_q);
-	q = shost->uspace_req_q;
-	if (q) {
-		queuedata = q->queuedata;
-		blk_cleanup_queue(q);
-		kfree(queuedata);
-	}
 
 	if (shost->shost_state == SHOST_CREATED) {
 		/*
@@ -479,6 +474,7 @@ struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
 		shost->dma_boundary = 0xffffffff;
 
 	shost->use_blk_mq = scsi_use_blk_mq;
+	shost->use_blk_mq = scsi_use_blk_mq || shost->hostt->force_blk_mq;
 
 	device_initialize(&shost->shost_gendev);
 	dev_set_name(&shost->shost_gendev, "host%d", shost->host_no);

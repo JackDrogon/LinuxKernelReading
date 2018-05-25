@@ -1,11 +1,12 @@
-#include "sched.h"
-
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
-#include <linux/kallsyms.h>
 #include <linux/utsname.h>
 #include <linux/security.h>
 #include <linux/export.h>
+#include <linux/nospec.h>
+
+#include "sched.h"
 
 unsigned int __read_mostly sysctl_sched_autogroup_enabled = 1;
 static struct autogroup autogroup_default;
@@ -71,7 +72,6 @@ static inline struct autogroup *autogroup_create(void)
 		goto out_fail;
 
 	tg = sched_create_group(&root_task_group);
-
 	if (IS_ERR(tg))
 		goto out_free;
 
@@ -101,7 +101,7 @@ out_free:
 out_fail:
 	if (printk_ratelimit()) {
 		printk(KERN_WARNING "autogroup_create: %s failure.\n",
-			ag ? "sched_create_group()" : "kmalloc()");
+			ag ? "sched_create_group()" : "kzalloc()");
 	}
 
 	return autogroup_kref_get(&autogroup_default);
@@ -213,7 +213,7 @@ int proc_sched_autogroup_set_nice(struct task_struct *p, int nice)
 	static unsigned long next = INITIAL_JIFFIES;
 	struct autogroup *ag;
 	unsigned long shares;
-	int err;
+	int err, idx;
 
 	if (nice < MIN_NICE || nice > MAX_NICE)
 		return -EINVAL;
@@ -231,7 +231,9 @@ int proc_sched_autogroup_set_nice(struct task_struct *p, int nice)
 
 	next = HZ / 10 + jiffies;
 	ag = autogroup_task_get(p);
-	shares = scale_load(sched_prio_to_weight[nice + 20]);
+
+	idx = array_index_nospec(nice + 20, 40);
+	shares = scale_load(sched_prio_to_weight[idx]);
 
 	down_write(&ag->lock);
 	err = sched_group_set_shares(ag->tg, shares);

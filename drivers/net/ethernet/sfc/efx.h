@@ -14,11 +14,6 @@
 #include "net_driver.h"
 #include "filter.h"
 
-/* All controllers use BAR 0 for I/O space and BAR 2(&3) for memory */
-/* All VFs use BAR 0/1 for memory */
-#define EFX_MEM_BAR 2
-#define EFX_MEM_VF_BAR 0
-
 int efx_net_open(struct net_device *net_dev);
 int efx_net_stop(struct net_device *net_dev);
 
@@ -32,8 +27,8 @@ netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 				struct net_device *net_dev);
 netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb);
 void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
-int efx_setup_tc(struct net_device *net_dev, u32 handle, u32 chain_index,
-		 __be16 proto, struct tc_to_netdev *tc);
+int efx_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
+		 void *type_data);
 unsigned int efx_tx_max_skb_descs(struct efx_nic *efx);
 extern unsigned int efx_piobuf_size;
 extern bool efx_separate_tx_channels;
@@ -46,7 +41,7 @@ void efx_remove_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_init_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_fini_rx_queue(struct efx_rx_queue *rx_queue);
 void efx_fast_push_rx_descriptors(struct efx_rx_queue *rx_queue, bool atomic);
-void efx_rx_slow_fill(unsigned long context);
+void efx_rx_slow_fill(struct timer_list *t);
 void __efx_rx_packet(struct efx_channel *channel);
 void efx_rx_packet(struct efx_rx_queue *rx_queue, unsigned int index,
 		   unsigned int n_frags, unsigned int len, u16 flags);
@@ -263,7 +258,9 @@ static inline void efx_schedule_channel_irq(struct efx_channel *channel)
 }
 
 void efx_link_status_changed(struct efx_nic *efx);
-void efx_link_set_advertising(struct efx_nic *efx, u32);
+void efx_link_set_advertising(struct efx_nic *efx,
+			      const unsigned long *advertising);
+void efx_link_clear_advertising(struct efx_nic *efx);
 void efx_link_set_wanted_fc(struct efx_nic *efx, u8);
 
 static inline void efx_device_detach_sync(struct efx_nic *efx)

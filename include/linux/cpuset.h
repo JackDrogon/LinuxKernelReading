@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_CPUSET_H
 #define _LINUX_CPUSET_H
 /*
@@ -35,12 +36,6 @@ extern struct static_key_false cpusets_enabled_key;
 static inline bool cpusets_enabled(void)
 {
 	return static_branch_unlikely(&cpusets_enabled_key);
-}
-
-static inline int nr_cpusets(void)
-{
-	/* jump label reference count + the top-level cpuset */
-	return static_key_count(&cpusets_enabled_key.key) + 1;
 }
 
 static inline void cpuset_inc(void)
@@ -117,7 +112,7 @@ static inline int cpuset_do_slab_mem_spread(void)
 	return task_spread_slab(current);
 }
 
-extern int current_cpuset_is_being_rebound(void);
+extern bool current_cpuset_is_being_rebound(void);
 
 extern void rebuild_sched_domains(void);
 
@@ -252,9 +247,9 @@ static inline int cpuset_do_slab_mem_spread(void)
 	return 0;
 }
 
-static inline int current_cpuset_is_being_rebound(void)
+static inline bool current_cpuset_is_being_rebound(void)
 {
-	return 0;
+	return false;
 }
 
 static inline void rebuild_sched_domains(void)

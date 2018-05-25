@@ -324,6 +324,7 @@ restart:
 	if (res) {
 		pr_warn("Bearer <%s> rejected, enable failure (%d)\n",
 			name, -res);
+		kfree(b);
 		return -EINVAL;
 	}
 
@@ -347,8 +348,10 @@ restart:
 	if (skb)
 		tipc_bearer_xmit_skb(net, bearer_id, skb, &b->bcast_addr);
 
-	if (tipc_mon_create(net, bearer_id))
+	if (tipc_mon_create(net, bearer_id)) {
+		bearer_disable(net, b);
 		return -ENOMEM;
+	}
 
 	pr_info("Enabled bearer <%s>, discovery domain %s, priority %u\n",
 		name,
@@ -365,30 +368,6 @@ static int tipc_reset_bearer(struct net *net, struct tipc_bearer *b)
 	tipc_node_delete_links(net, b->identity);
 	tipc_disc_reset(net, b);
 	return 0;
-}
-
-/* tipc_bearer_reset_all - reset all links on all bearers
- */
-void tipc_bearer_reset_all(struct net *net)
-{
-	struct tipc_bearer *b;
-	int i;
-
-	for (i = 0; i < MAX_BEARERS; i++) {
-		b = bearer_get(net, i);
-		if (b)
-			clear_bit_unlock(0, &b->up);
-	}
-	for (i = 0; i < MAX_BEARERS; i++) {
-		b = bearer_get(net, i);
-		if (b)
-			tipc_reset_bearer(net, b);
-	}
-	for (i = 0; i < MAX_BEARERS; i++) {
-		b = bearer_get(net, i);
-		if (b)
-			test_and_set_bit_lock(0, &b->up);
-	}
 }
 
 /**
@@ -661,7 +640,7 @@ static int tipc_l2_device_event(struct notifier_block *nb, unsigned long evt,
 		break;
 	case NETDEV_UNREGISTER:
 	case NETDEV_CHANGENAME:
-		bearer_disable(dev_net(dev), b);
+		bearer_disable(net, b);
 		break;
 	}
 	return NOTIFY_OK;
@@ -834,7 +813,7 @@ err_out:
 	return err;
 }
 
-int tipc_nl_bearer_disable(struct sk_buff *skb, struct genl_info *info)
+int __tipc_nl_bearer_disable(struct sk_buff *skb, struct genl_info *info)
 {
 	int err;
 	char *name;
@@ -856,20 +835,27 @@ int tipc_nl_bearer_disable(struct sk_buff *skb, struct genl_info *info)
 
 	name = nla_data(attrs[TIPC_NLA_BEARER_NAME]);
 
-	rtnl_lock();
 	bearer = tipc_bearer_find(net, name);
-	if (!bearer) {
-		rtnl_unlock();
+	if (!bearer)
 		return -EINVAL;
-	}
 
 	bearer_disable(net, bearer);
-	rtnl_unlock();
 
 	return 0;
 }
 
-int tipc_nl_bearer_enable(struct sk_buff *skb, struct genl_info *info)
+int tipc_nl_bearer_disable(struct sk_buff *skb, struct genl_info *info)
+{
+	int err;
+
+	rtnl_lock();
+	err = __tipc_nl_bearer_disable(skb, info);
+	rtnl_unlock();
+
+	return err;
+}
+
+int __tipc_nl_bearer_enable(struct sk_buff *skb, struct genl_info *info)
 {
 	int err;
 	char *bearer;
@@ -911,15 +897,18 @@ int tipc_nl_bearer_enable(struct sk_buff *skb, struct genl_info *info)
 			prio = nla_get_u32(props[TIPC_NLA_PROP_PRIO]);
 	}
 
+	return tipc_enable_bearer(net, bearer, domain, prio, attrs);
+}
+
+int tipc_nl_bearer_enable(struct sk_buff *skb, struct genl_info *info)
+{
+	int err;
+
 	rtnl_lock();
-	err = tipc_enable_bearer(net, bearer, domain, prio, attrs);
-	if (err) {
-		rtnl_unlock();
-		return err;
-	}
+	err = __tipc_nl_bearer_enable(skb, info);
 	rtnl_unlock();
 
-	return 0;
+	return err;
 }
 
 int tipc_nl_bearer_add(struct sk_buff *skb, struct genl_info *info)
@@ -965,7 +954,7 @@ int tipc_nl_bearer_add(struct sk_buff *skb, struct genl_info *info)
 	return 0;
 }
 
-int tipc_nl_bearer_set(struct sk_buff *skb, struct genl_info *info)
+int __tipc_nl_bearer_set(struct sk_buff *skb, struct genl_info *info)
 {
 	int err;
 	char *name;
@@ -986,22 +975,17 @@ int tipc_nl_bearer_set(struct sk_buff *skb, struct genl_info *info)
 		return -EINVAL;
 	name = nla_data(attrs[TIPC_NLA_BEARER_NAME]);
 
-	rtnl_lock();
 	b = tipc_bearer_find(net, name);
-	if (!b) {
-		rtnl_unlock();
+	if (!b)
 		return -EINVAL;
-	}
 
 	if (attrs[TIPC_NLA_BEARER_PROP]) {
 		struct nlattr *props[TIPC_NLA_PROP_MAX + 1];
 
 		err = tipc_nl_parse_link_prop(attrs[TIPC_NLA_BEARER_PROP],
 					      props);
-		if (err) {
-			rtnl_unlock();
+		if (err)
 			return err;
-		}
 
 		if (props[TIPC_NLA_PROP_TOL])
 			b->tolerance = nla_get_u32(props[TIPC_NLA_PROP_TOL]);
@@ -1010,9 +994,19 @@ int tipc_nl_bearer_set(struct sk_buff *skb, struct genl_info *info)
 		if (props[TIPC_NLA_PROP_WIN])
 			b->window = nla_get_u32(props[TIPC_NLA_PROP_WIN]);
 	}
-	rtnl_unlock();
 
 	return 0;
+}
+
+int tipc_nl_bearer_set(struct sk_buff *skb, struct genl_info *info)
+{
+	int err;
+
+	rtnl_lock();
+	err = __tipc_nl_bearer_set(skb, info);
+	rtnl_unlock();
+
+	return err;
 }
 
 static int __tipc_nl_add_media(struct tipc_nl_msg *msg,
@@ -1136,7 +1130,7 @@ err_out:
 	return err;
 }
 
-int tipc_nl_media_set(struct sk_buff *skb, struct genl_info *info)
+int __tipc_nl_media_set(struct sk_buff *skb, struct genl_info *info)
 {
 	int err;
 	char *name;
@@ -1154,22 +1148,17 @@ int tipc_nl_media_set(struct sk_buff *skb, struct genl_info *info)
 		return -EINVAL;
 	name = nla_data(attrs[TIPC_NLA_MEDIA_NAME]);
 
-	rtnl_lock();
 	m = tipc_media_find(name);
-	if (!m) {
-		rtnl_unlock();
+	if (!m)
 		return -EINVAL;
-	}
 
 	if (attrs[TIPC_NLA_MEDIA_PROP]) {
 		struct nlattr *props[TIPC_NLA_PROP_MAX + 1];
 
 		err = tipc_nl_parse_link_prop(attrs[TIPC_NLA_MEDIA_PROP],
 					      props);
-		if (err) {
-			rtnl_unlock();
+		if (err)
 			return err;
-		}
 
 		if (props[TIPC_NLA_PROP_TOL])
 			m->tolerance = nla_get_u32(props[TIPC_NLA_PROP_TOL]);
@@ -1178,7 +1167,17 @@ int tipc_nl_media_set(struct sk_buff *skb, struct genl_info *info)
 		if (props[TIPC_NLA_PROP_WIN])
 			m->window = nla_get_u32(props[TIPC_NLA_PROP_WIN]);
 	}
-	rtnl_unlock();
 
 	return 0;
+}
+
+int tipc_nl_media_set(struct sk_buff *skb, struct genl_info *info)
+{
+	int err;
+
+	rtnl_lock();
+	err = __tipc_nl_media_set(skb, info);
+	rtnl_unlock();
+
+	return err;
 }

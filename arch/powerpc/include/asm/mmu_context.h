@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __ASM_POWERPC_MMU_CONTEXT_H
 #define __ASM_POWERPC_MMU_CONTEXT_H
 #ifdef __KERNEL__
@@ -77,76 +78,62 @@ extern void switch_cop(struct mm_struct *next);
 extern int use_cop(unsigned long acop, struct mm_struct *mm);
 extern void drop_cop(unsigned long acop, struct mm_struct *mm);
 
-/*
- * switch_mm is the entry point called from the architecture independent
- * code in kernel/sched/core.c
- */
-static inline void switch_mm_irqs_off(struct mm_struct *prev,
-				      struct mm_struct *next,
-				      struct task_struct *tsk)
+#ifdef CONFIG_PPC_BOOK3S_64
+static inline void inc_mm_active_cpus(struct mm_struct *mm)
 {
-	bool new_on_cpu = false;
+	atomic_inc(&mm->context.active_cpus);
+}
 
-	/* Mark this context has been used on the new CPU */
-	if (!cpumask_test_cpu(smp_processor_id(), mm_cpumask(next))) {
-		cpumask_set_cpu(smp_processor_id(), mm_cpumask(next));
+static inline void dec_mm_active_cpus(struct mm_struct *mm)
+{
+	atomic_dec(&mm->context.active_cpus);
+}
 
-		/*
-		 * This full barrier orders the store to the cpumask above vs
-		 * a subsequent operation which allows this CPU to begin loading
-		 * translations for next.
-		 *
-		 * When using the radix MMU that operation is the load of the
-		 * MMU context id, which is then moved to SPRN_PID.
-		 *
-		 * For the hash MMU it is either the first load from slb_cache
-		 * in switch_slb(), and/or the store of paca->mm_ctx_id in
-		 * copy_mm_to_paca().
-		 *
-		 * On the read side the barrier is in pte_xchg(), which orders
-		 * the store to the PTE vs the load of mm_cpumask.
-		 */
-		smp_mb();
-
-		new_on_cpu = true;
-	}
-
-	/* 32-bit keeps track of the current PGDIR in the thread struct */
-#ifdef CONFIG_PPC32
-	tsk->thread.pgdir = next->pgd;
-#endif /* CONFIG_PPC32 */
-
-	/* 64-bit Book3E keeps track of current PGD in the PACA */
-#ifdef CONFIG_PPC_BOOK3E_64
-	get_paca()->pgd = next->pgd;
-#endif
-	/* Nothing else to do if we aren't actually switching */
-	if (prev == next)
-		return;
-
-#ifdef CONFIG_PPC_ICSWX
-	/* Switch coprocessor context only if prev or next uses a coprocessor */
-	if (prev->context.acop || next->context.acop)
-		switch_cop(next);
-#endif /* CONFIG_PPC_ICSWX */
-
-	/* We must stop all altivec streams before changing the HW
-	 * context
+static inline void mm_context_add_copro(struct mm_struct *mm)
+{
+	/*
+	 * If any copro is in use, increment the active CPU count
+	 * in order to force TLB invalidations to be global as to
+	 * propagate to the Nest MMU.
 	 */
-#ifdef CONFIG_ALTIVEC
-	if (cpu_has_feature(CPU_FTR_ALTIVEC))
-		asm volatile ("dssall");
-#endif /* CONFIG_ALTIVEC */
+	if (atomic_inc_return(&mm->context.copros) == 1)
+		inc_mm_active_cpus(mm);
+}
 
-	if (new_on_cpu)
-		radix_kvm_prefetch_workaround(next);
+static inline void mm_context_remove_copro(struct mm_struct *mm)
+{
+	int c;
+
+	c = atomic_dec_if_positive(&mm->context.copros);
+
+	/* Detect imbalance between add and remove */
+	WARN_ON(c < 0);
 
 	/*
-	 * The actual HW switching method differs between the various
-	 * sub architectures. Out of line for now
+	 * Need to broadcast a global flush of the full mm before
+	 * decrementing active_cpus count, as the next TLBI may be
+	 * local and the nMMU and/or PSL need to be cleaned up.
+	 * Should be rare enough so that it's acceptable.
+	 *
+	 * Skip on hash, as we don't know how to do the proper flush
+	 * for the time being. Invalidations will remain global if
+	 * used on hash.
 	 */
-	switch_mmu_context(prev, next, tsk);
+	if (c == 0 && radix_enabled()) {
+		flush_all_mm(mm);
+		dec_mm_active_cpus(mm);
+	}
 }
+#else
+static inline void inc_mm_active_cpus(struct mm_struct *mm) { }
+static inline void dec_mm_active_cpus(struct mm_struct *mm) { }
+static inline void mm_context_add_copro(struct mm_struct *mm) { }
+static inline void mm_context_remove_copro(struct mm_struct *mm) { }
+#endif
+
+
+extern void switch_mm_irqs_off(struct mm_struct *prev, struct mm_struct *next,
+			       struct task_struct *tsk);
 
 static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 			     struct task_struct *tsk)
@@ -168,11 +155,7 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
  */
 static inline void activate_mm(struct mm_struct *prev, struct mm_struct *next)
 {
-	unsigned long flags;
-
-	local_irq_save(flags);
 	switch_mm(prev, next, current);
-	local_irq_restore(flags);
 }
 
 /* We don't currently use enter_lazy_tlb() for anything */
@@ -185,14 +168,19 @@ static inline void enter_lazy_tlb(struct mm_struct *mm,
 #endif
 }
 
-static inline void arch_dup_mmap(struct mm_struct *oldmm,
-				 struct mm_struct *mm)
+static inline int arch_dup_mmap(struct mm_struct *oldmm,
+				struct mm_struct *mm)
 {
+	return 0;
 }
 
+#ifndef CONFIG_PPC_BOOK3S_64
 static inline void arch_exit_mmap(struct mm_struct *mm)
 {
 }
+#else
+extern void arch_exit_mmap(struct mm_struct *mm);
+#endif
 
 static inline void arch_unmap(struct mm_struct *mm,
 			      struct vm_area_struct *vma,
@@ -207,11 +195,33 @@ static inline void arch_bprm_mm_init(struct mm_struct *mm,
 {
 }
 
+#ifdef CONFIG_PPC_MEM_KEYS
+bool arch_vma_access_permitted(struct vm_area_struct *vma, bool write,
+			       bool execute, bool foreign);
+#else /* CONFIG_PPC_MEM_KEYS */
 static inline bool arch_vma_access_permitted(struct vm_area_struct *vma,
 		bool write, bool execute, bool foreign)
 {
 	/* by default, allow everything */
 	return true;
 }
+
+#define pkey_mm_init(mm)
+#define thread_pkey_regs_save(thread)
+#define thread_pkey_regs_restore(new_thread, old_thread)
+#define thread_pkey_regs_init(thread)
+
+static inline int vma_pkey(struct vm_area_struct *vma)
+{
+	return 0;
+}
+
+static inline u64 pte_to_hpte_pkey_bits(u64 pteflags)
+{
+	return 0x0UL;
+}
+
+#endif /* CONFIG_PPC_MEM_KEYS */
+
 #endif /* __KERNEL__ */
 #endif /* __ASM_POWERPC_MMU_CONTEXT_H */
