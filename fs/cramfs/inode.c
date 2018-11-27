@@ -90,7 +90,7 @@ static struct inode *get_cramfs_inode(struct super_block *sb,
 	const struct cramfs_inode *cramfs_inode, unsigned int offset)
 {
 	struct inode *inode;
-	static struct timespec zerotime;
+	static struct timespec64 zerotime;
 
 	inode = iget_locked(sb, cramino(cramfs_inode, offset));
 	if (!inode)
@@ -202,7 +202,8 @@ static void *cramfs_blkdev_read(struct super_block *sb, unsigned int offset,
 			continue;
 		blk_offset = (blocknr - buffer_blocknr[i]) << PAGE_SHIFT;
 		blk_offset += offset;
-		if (blk_offset + len > BUFFER_SIZE)
+		if (blk_offset > BUFFER_SIZE ||
+		    blk_offset + len > BUFFER_SIZE)
 			continue;
 		return read_buffers[i] + blk_offset;
 	}
@@ -492,7 +493,7 @@ static void cramfs_kill_sb(struct super_block *sb)
 {
 	struct cramfs_sb_info *sbi = CRAMFS_SB(sb);
 
-	if (IS_ENABLED(CCONFIG_CRAMFS_MTD) && sb->s_mtd) {
+	if (IS_ENABLED(CONFIG_CRAMFS_MTD) && sb->s_mtd) {
 		if (sbi && sbi->mtd_point_size)
 			mtd_unpoint(sb->s_mtd, 0, sbi->mtd_point_size);
 		kill_mtd_super(sb);
@@ -808,10 +809,7 @@ static struct dentry *cramfs_lookup(struct inode *dir, struct dentry *dentry, un
 	}
 out:
 	mutex_unlock(&read_mutex);
-	if (IS_ERR(inode))
-		return ERR_CAST(inode);
-	d_add(dentry, inode);
-	return NULL;
+	return d_splice_alias(inode, dentry);
 }
 
 static int cramfs_readpage(struct file *file, struct page *page)

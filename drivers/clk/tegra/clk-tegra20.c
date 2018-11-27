@@ -26,6 +26,8 @@
 #include "clk.h"
 #include "clk-id.h"
 
+#define MISC_CLK_ENB 0x48
+
 #define OSC_CTRL 0x50
 #define OSC_CTRL_OSC_FREQ_MASK (3<<30)
 #define OSC_CTRL_OSC_FREQ_13MHZ (0<<30)
@@ -831,15 +833,25 @@ static void __init tegra20_periph_clk_init(void)
 				    periph_clk_enb_refcnt);
 	clks[TEGRA20_CLK_PEX] = clk;
 
+	/* dev1 OSC divider */
+	clk_register_divider(NULL, "dev1_osc_div", "clk_m",
+			     0, clk_base + MISC_CLK_ENB, 22, 2,
+			     CLK_DIVIDER_POWER_OF_TWO | CLK_DIVIDER_READ_ONLY,
+			     NULL);
+
+	/* dev2 OSC divider */
+	clk_register_divider(NULL, "dev2_osc_div", "clk_m",
+			     0, clk_base + MISC_CLK_ENB, 20, 2,
+			     CLK_DIVIDER_POWER_OF_TWO | CLK_DIVIDER_READ_ONLY,
+			     NULL);
+
 	/* cdev1 */
-	clk = clk_register_fixed_rate(NULL, "cdev1_fixed", NULL, 0, 26000000);
-	clk = tegra_clk_register_periph_gate("cdev1", "cdev1_fixed", 0,
+	clk = tegra_clk_register_periph_gate("cdev1", "cdev1_mux", 0,
 				    clk_base, 0, 94, periph_clk_enb_refcnt);
 	clks[TEGRA20_CLK_CDEV1] = clk;
 
 	/* cdev2 */
-	clk = clk_register_fixed_rate(NULL, "cdev2_fixed", NULL, 0, 26000000);
-	clk = tegra_clk_register_periph_gate("cdev2", "cdev2_fixed", 0,
+	clk = tegra_clk_register_periph_gate("cdev2", "cdev2_mux", 0,
 				    clk_base, 0, 93, periph_clk_enb_refcnt);
 	clks[TEGRA20_CLK_CDEV2] = clk;
 
@@ -1018,9 +1030,9 @@ static struct tegra_clk_init_table init_table[] __initdata = {
 	{ TEGRA20_CLK_PLL_P_OUT3, TEGRA20_CLK_CLK_MAX, 72000000, 1 },
 	{ TEGRA20_CLK_PLL_P_OUT4, TEGRA20_CLK_CLK_MAX, 24000000, 1 },
 	{ TEGRA20_CLK_PLL_C, TEGRA20_CLK_CLK_MAX, 600000000, 0 },
-	{ TEGRA20_CLK_PLL_C_OUT1, TEGRA20_CLK_CLK_MAX, 216000000, 0 },
-	{ TEGRA20_CLK_SCLK, TEGRA20_CLK_PLL_C_OUT1, 0, 0 },
-	{ TEGRA20_CLK_HCLK, TEGRA20_CLK_CLK_MAX, 0, 0 },
+	{ TEGRA20_CLK_PLL_C_OUT1, TEGRA20_CLK_CLK_MAX, 240000000, 0 },
+	{ TEGRA20_CLK_SCLK, TEGRA20_CLK_PLL_C_OUT1, 240000000, 0 },
+	{ TEGRA20_CLK_HCLK, TEGRA20_CLK_CLK_MAX, 240000000, 0 },
 	{ TEGRA20_CLK_PCLK, TEGRA20_CLK_CLK_MAX, 60000000, 0 },
 	{ TEGRA20_CLK_CSITE, TEGRA20_CLK_CLK_MAX, 0, 1 },
 	{ TEGRA20_CLK_CCLK, TEGRA20_CLK_CLK_MAX, 0, 1 },
@@ -1048,6 +1060,7 @@ static struct tegra_clk_init_table init_table[] __initdata = {
 	{ TEGRA20_CLK_DISP2, TEGRA20_CLK_PLL_P, 600000000, 0 },
 	{ TEGRA20_CLK_GR2D, TEGRA20_CLK_PLL_C, 300000000, 0 },
 	{ TEGRA20_CLK_GR3D, TEGRA20_CLK_PLL_C, 300000000, 0 },
+	{ TEGRA20_CLK_VDE, TEGRA20_CLK_CLK_MAX, 300000000, 0 },
 	/* must be the last entry */
 	{ TEGRA20_CLK_CLK_MAX, TEGRA20_CLK_CLK_MAX, 0, 0 },
 };
@@ -1075,6 +1088,36 @@ static const struct of_device_id pmc_match[] __initconst = {
 	{ .compatible = "nvidia,tegra20-pmc" },
 	{ },
 };
+
+static struct clk *tegra20_clk_src_onecell_get(struct of_phandle_args *clkspec,
+					       void *data)
+{
+	struct clk_hw *parent_hw;
+	struct clk_hw *hw;
+	struct clk *clk;
+
+	clk = of_clk_src_onecell_get(clkspec, data);
+	if (IS_ERR(clk))
+		return clk;
+
+	/*
+	 * Tegra20 CDEV1 and CDEV2 clocks are a bit special case, their parent
+	 * clock is created by the pinctrl driver. It is possible for clk user
+	 * to request these clocks before pinctrl driver got probed and hence
+	 * user will get an orphaned clock. That might be undesirable because
+	 * user may expect parent clock to be enabled by the child.
+	 */
+	if (clkspec->args[0] == TEGRA20_CLK_CDEV1 ||
+	    clkspec->args[0] == TEGRA20_CLK_CDEV2) {
+		hw = __clk_get_hw(clk);
+
+		parent_hw = clk_hw_get_parent(hw);
+		if (!parent_hw)
+			return ERR_PTR(-EPROBE_DEFER);
+	}
+
+	return clk;
+}
 
 static void __init tegra20_clock_init(struct device_node *np)
 {
@@ -1114,7 +1157,7 @@ static void __init tegra20_clock_init(struct device_node *np)
 
 	tegra_init_dup_clks(tegra_clk_duplicates, clks, TEGRA20_CLK_CLK_MAX);
 
-	tegra_add_of_provider(np);
+	tegra_add_of_provider(np, tegra20_clk_src_onecell_get);
 	tegra_register_devclks(devclks, ARRAY_SIZE(devclks));
 
 	tegra_clk_apply_init_table = tegra20_clock_apply_init_table;

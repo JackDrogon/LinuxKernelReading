@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Intel pinctrl/GPIO core driver.
  *
  * Copyright (C) 2015, Intel Corporation
  * Authors: Mathias Nyman <mathias.nyman@linux.intel.com>
  *          Mika Westerberg <mika.westerberg@linux.intel.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -425,6 +422,18 @@ static void __intel_gpio_set_direction(void __iomem *padcfg0, bool input)
 	writel(value, padcfg0);
 }
 
+static void intel_gpio_set_gpio_mode(void __iomem *padcfg0)
+{
+	u32 value;
+
+	/* Put the pad into GPIO mode */
+	value = readl(padcfg0) & ~PADCFG0_PMODE_MASK;
+	/* Disable SCI/SMI/NMI generation */
+	value &= ~(PADCFG0_GPIROUTIOXAPIC | PADCFG0_GPIROUTSCI);
+	value &= ~(PADCFG0_GPIROUTSMI | PADCFG0_GPIROUTNMI);
+	writel(value, padcfg0);
+}
+
 static int intel_gpio_request_enable(struct pinctrl_dev *pctldev,
 				     struct pinctrl_gpio_range *range,
 				     unsigned pin)
@@ -432,7 +441,6 @@ static int intel_gpio_request_enable(struct pinctrl_dev *pctldev,
 	struct intel_pinctrl *pctrl = pinctrl_dev_get_drvdata(pctldev);
 	void __iomem *padcfg0;
 	unsigned long flags;
-	u32 value;
 
 	raw_spin_lock_irqsave(&pctrl->lock, flags);
 
@@ -442,13 +450,7 @@ static int intel_gpio_request_enable(struct pinctrl_dev *pctldev,
 	}
 
 	padcfg0 = intel_get_padcfg(pctrl, pin, PADCFG0);
-	/* Put the pad into GPIO mode */
-	value = readl(padcfg0) & ~PADCFG0_PMODE_MASK;
-	/* Disable SCI/SMI/NMI generation */
-	value &= ~(PADCFG0_GPIROUTIOXAPIC | PADCFG0_GPIROUTSCI);
-	value &= ~(PADCFG0_GPIROUTSMI | PADCFG0_GPIROUTNMI);
-	writel(value, padcfg0);
-
+	intel_gpio_set_gpio_mode(padcfg0);
 	/* Disable TX buffer and enable RX (this will be input) */
 	__intel_gpio_set_direction(padcfg0, true);
 
@@ -745,67 +747,6 @@ static const struct pinctrl_desc intel_pinctrl_desc = {
 	.owner = THIS_MODULE,
 };
 
-static int intel_gpio_get(struct gpio_chip *chip, unsigned offset)
-{
-	struct intel_pinctrl *pctrl = gpiochip_get_data(chip);
-	void __iomem *reg;
-	u32 padcfg0;
-
-	reg = intel_get_padcfg(pctrl, offset, PADCFG0);
-	if (!reg)
-		return -EINVAL;
-
-	padcfg0 = readl(reg);
-	if (!(padcfg0 & PADCFG0_GPIOTXDIS))
-		return !!(padcfg0 & PADCFG0_GPIOTXSTATE);
-
-	return !!(padcfg0 & PADCFG0_GPIORXSTATE);
-}
-
-static void intel_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
-{
-	struct intel_pinctrl *pctrl = gpiochip_get_data(chip);
-	unsigned long flags;
-	void __iomem *reg;
-	u32 padcfg0;
-
-	reg = intel_get_padcfg(pctrl, offset, PADCFG0);
-	if (!reg)
-		return;
-
-	raw_spin_lock_irqsave(&pctrl->lock, flags);
-	padcfg0 = readl(reg);
-	if (value)
-		padcfg0 |= PADCFG0_GPIOTXSTATE;
-	else
-		padcfg0 &= ~PADCFG0_GPIOTXSTATE;
-	writel(padcfg0, reg);
-	raw_spin_unlock_irqrestore(&pctrl->lock, flags);
-}
-
-static int intel_gpio_direction_input(struct gpio_chip *chip, unsigned offset)
-{
-	return pinctrl_gpio_direction_input(chip->base + offset);
-}
-
-static int intel_gpio_direction_output(struct gpio_chip *chip, unsigned offset,
-				       int value)
-{
-	intel_gpio_set(chip, offset, value);
-	return pinctrl_gpio_direction_output(chip->base + offset);
-}
-
-static const struct gpio_chip intel_gpio_chip = {
-	.owner = THIS_MODULE,
-	.request = gpiochip_generic_request,
-	.free = gpiochip_generic_free,
-	.direction_input = intel_gpio_direction_input,
-	.direction_output = intel_gpio_direction_output,
-	.get = intel_gpio_get,
-	.set = intel_gpio_set,
-	.set_config = gpiochip_generic_config,
-};
-
 /**
  * intel_gpio_to_pin() - Translate from GPIO offset to pin number
  * @pctrl: Pinctrl structure
@@ -850,6 +791,101 @@ static int intel_gpio_to_pin(struct intel_pinctrl *pctrl, unsigned offset,
 
 	return -EINVAL;
 }
+
+static int intel_gpio_get(struct gpio_chip *chip, unsigned offset)
+{
+	struct intel_pinctrl *pctrl = gpiochip_get_data(chip);
+	void __iomem *reg;
+	u32 padcfg0;
+	int pin;
+
+	pin = intel_gpio_to_pin(pctrl, offset, NULL, NULL);
+	if (pin < 0)
+		return -EINVAL;
+
+	reg = intel_get_padcfg(pctrl, pin, PADCFG0);
+	if (!reg)
+		return -EINVAL;
+
+	padcfg0 = readl(reg);
+	if (!(padcfg0 & PADCFG0_GPIOTXDIS))
+		return !!(padcfg0 & PADCFG0_GPIOTXSTATE);
+
+	return !!(padcfg0 & PADCFG0_GPIORXSTATE);
+}
+
+static void intel_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+{
+	struct intel_pinctrl *pctrl = gpiochip_get_data(chip);
+	unsigned long flags;
+	void __iomem *reg;
+	u32 padcfg0;
+	int pin;
+
+	pin = intel_gpio_to_pin(pctrl, offset, NULL, NULL);
+	if (pin < 0)
+		return;
+
+	reg = intel_get_padcfg(pctrl, pin, PADCFG0);
+	if (!reg)
+		return;
+
+	raw_spin_lock_irqsave(&pctrl->lock, flags);
+	padcfg0 = readl(reg);
+	if (value)
+		padcfg0 |= PADCFG0_GPIOTXSTATE;
+	else
+		padcfg0 &= ~PADCFG0_GPIOTXSTATE;
+	writel(padcfg0, reg);
+	raw_spin_unlock_irqrestore(&pctrl->lock, flags);
+}
+
+static int intel_gpio_get_direction(struct gpio_chip *chip, unsigned int offset)
+{
+	struct intel_pinctrl *pctrl = gpiochip_get_data(chip);
+	void __iomem *reg;
+	u32 padcfg0;
+	int pin;
+
+	pin = intel_gpio_to_pin(pctrl, offset, NULL, NULL);
+	if (pin < 0)
+		return -EINVAL;
+
+	reg = intel_get_padcfg(pctrl, pin, PADCFG0);
+	if (!reg)
+		return -EINVAL;
+
+	padcfg0 = readl(reg);
+
+	if (padcfg0 & PADCFG0_PMODE_MASK)
+		return -EINVAL;
+
+	return !!(padcfg0 & PADCFG0_GPIOTXDIS);
+}
+
+static int intel_gpio_direction_input(struct gpio_chip *chip, unsigned offset)
+{
+	return pinctrl_gpio_direction_input(chip->base + offset);
+}
+
+static int intel_gpio_direction_output(struct gpio_chip *chip, unsigned offset,
+				       int value)
+{
+	intel_gpio_set(chip, offset, value);
+	return pinctrl_gpio_direction_output(chip->base + offset);
+}
+
+static const struct gpio_chip intel_gpio_chip = {
+	.owner = THIS_MODULE,
+	.request = gpiochip_generic_request,
+	.free = gpiochip_generic_free,
+	.get_direction = intel_gpio_get_direction,
+	.direction_input = intel_gpio_direction_input,
+	.direction_output = intel_gpio_direction_output,
+	.get = intel_gpio_get,
+	.set = intel_gpio_set,
+	.set_config = gpiochip_generic_config,
+};
 
 static void intel_gpio_irq_ack(struct irq_data *d)
 {
@@ -967,6 +1003,8 @@ static int intel_gpio_irq_type(struct irq_data *d, unsigned type)
 	}
 
 	raw_spin_lock_irqsave(&pctrl->lock, flags);
+
+	intel_gpio_set_gpio_mode(reg);
 
 	value = readl(reg);
 

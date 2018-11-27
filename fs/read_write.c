@@ -301,7 +301,7 @@ loff_t vfs_llseek(struct file *file, loff_t offset, int whence)
 }
 EXPORT_SYMBOL(vfs_llseek);
 
-SYSCALL_DEFINE3(lseek, unsigned int, fd, off_t, offset, unsigned int, whence)
+off_t ksys_lseek(unsigned int fd, off_t offset, unsigned int whence)
 {
 	off_t retval;
 	struct fd f = fdget_pos(fd);
@@ -319,10 +319,15 @@ SYSCALL_DEFINE3(lseek, unsigned int, fd, off_t, offset, unsigned int, whence)
 	return retval;
 }
 
+SYSCALL_DEFINE3(lseek, unsigned int, fd, off_t, offset, unsigned int, whence)
+{
+	return ksys_lseek(fd, offset, whence);
+}
+
 #ifdef CONFIG_COMPAT
 COMPAT_SYSCALL_DEFINE3(lseek, unsigned int, fd, compat_off_t, offset, unsigned int, whence)
 {
-	return sys_lseek(fd, offset, whence);
+	return ksys_lseek(fd, offset, whence);
 }
 #endif
 
@@ -378,13 +383,13 @@ int rw_verify_area(int read_write, struct file *file, const loff_t *ppos, size_t
 	}
 
 	if (unlikely(inode->i_flctx && mandatory_lock(inode))) {
-          // 这里locks_mandatory_areas是调用的fs.h那个不是lock.c中的那个
-          // 不过也说不定，这个只是死锁检测，可能开了某个内核的配置就会有了吧
-          retval = locks_mandatory_area(inode, file, pos, pos + count - 1,
-                                        read_write == READ ? F_RDLCK : F_WRLCK);
-          if (retval < 0)
-            return retval;
-        }
+		// 这里locks_mandatory_areas是调用的fs.h那个不是lock.c中的那个
+		// 不过也说不定，这个只是死锁检测，可能开了某个内核的配置就会有了吧
+		retval = locks_mandatory_area(inode, file, pos, pos + count - 1,
+				read_write == READ ? F_RDLCK : F_WRLCK);
+		if (retval < 0)
+			return retval;
+	}
 	return security_file_permission(file,
 				read_write == READ ? MAY_READ : MAY_WRITE);
 }
@@ -409,13 +414,13 @@ static ssize_t new_sync_read(struct file *filp, char __user *buf, size_t len, lo
 ssize_t __vfs_read(struct file *file, char __user *buf, size_t count,
 		   loff_t *pos)
 {
-  // 调用对应的fs的read，没有read就调用read_iter, 否则报错
-  if (file->f_op->read)
-    return file->f_op->read(file, buf, count, pos);
-  else if (file->f_op->read_iter)
-    return new_sync_read(file, buf, count, pos); // 同步读
-  else
-    return -EINVAL;
+	// 调用对应的fs的read，没有read就调用read_iter, 否则报错
+	if (file->f_op->read)
+		return file->f_op->read(file, buf, count, pos);
+	else if (file->f_op->read_iter)
+		return new_sync_read(file, buf, count, pos); // 同步读
+	else
+		return -EINVAL;
 }
 
 ssize_t kernel_read(struct file *file, void *buf, size_t count, loff_t *pos)
@@ -436,31 +441,31 @@ ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
 
-        // 由此可见，文件的权限是否可读是在vfs层做了的
-        if (!(file->f_mode & FMODE_READ))
-          return -EBADF;
+	// 由此可见，文件的权限是否可读是在vfs层做了的
+	if (!(file->f_mode & FMODE_READ))
+		return -EBADF;
 	if (!(file->f_mode & FMODE_CAN_READ))
 		return -EINVAL;
 	if (unlikely(!access_ok(VERIFY_WRITE, buf, count)))
 		return -EFAULT;
 
-        // 检测文件是否可读，可能有死锁检测，主要是检测长度是否正确，宝库负数count和位置溢出
-        ret = rw_verify_area(READ, file, pos, count);
-        if (!ret) {
-          // MAX_RW_COUNT (INT_MAX & PAGE_MASK)
-          if (count > MAX_RW_COUNT)
-            count = MAX_RW_COUNT;
-          ret = __vfs_read(file, buf, count, pos); // 传递给__vfs_read
-          if (ret > 0) {
-            fsnotify_access(file); // 文件读事件通知，会向parent传递
-            add_rchar(
-                current,
-                ret); // 向当前线程的task队列添加一个读事件，也许是用于io统计
-          }
-          inc_syscr(current); // sys事件 + 1
-        }
+	// 检测文件是否可读，可能有死锁检测，主要是检测长度是否正确，宝库负数count和位置溢出
+	ret = rw_verify_area(READ, file, pos, count);
+	if (!ret) {
+		// MAX_RW_COUNT (INT_MAX & PAGE_MASK)
+		if (count > MAX_RW_COUNT)
+			count =  MAX_RW_COUNT;
+		ret = __vfs_read(file, buf, count, pos); // 传递给__vfs_read
+		if (ret > 0) {
+			fsnotify_access(file); // 文件读事件通知，会向parent传递
+			add_rchar(
+				current,
+				ret); // 向当前线程的task队列添加一个读事件，也许是用于io统计
+		}
+		inc_syscr(current); // sys事件 + 1
+	}
 
-        return ret;
+	return ret;
 }
 
 static ssize_t new_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
@@ -571,23 +576,27 @@ static inline void file_pos_write(struct file *file, loff_t pos)
 	file->f_pos = pos;
 }
 
-SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 {
-  struct fd f = fdget_pos(fd); // 从fd获取file的真正结构
-  ssize_t ret = -EBADF;
+	struct fd f = fdget_pos(fd); // 从fd获取file的真正结构
+	ssize_t ret = -EBADF;
 
-  if (f.file) {
-    loff_t pos = file_pos_read(f.file); // 获取在当前文件中的偏移
-    ret = vfs_read(f.file, buf, count, &pos); // vfs层读取文件
-    if (ret >= 0)
-      file_pos_write(f.file, pos); // 读取成功后设置pos
-    fdput_pos(f); // 将因为文件读取引发的相关task放入队列
-  }
-        return ret;
+	if (f.file) {
+		loff_t pos = file_pos_read(f.file); // 获取在当前文件中的偏移
+		ret = vfs_read(f.file, buf, count, &pos); // vfs层读取文件
+		if (ret >= 0)
+			file_pos_write(f.file, pos); // 读取成功后设置pos
+		fdput_pos(f); // 将因为文件读取引发的相关task放入队列
+	}
+	return ret;
 }
 
-SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
-		size_t, count)
+SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+{
+	return ksys_read(fd, buf, count);
+}
+
+ssize_t ksys_write(unsigned int fd, const char __user *buf, size_t count)
 {
 	struct fd f = fdget_pos(fd);
 	ssize_t ret = -EBADF;
@@ -603,8 +612,14 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 	return ret;
 }
 
-SYSCALL_DEFINE4(pread64, unsigned int, fd, char __user *, buf,
-			size_t, count, loff_t, pos)
+SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
+		size_t, count)
+{
+	return ksys_write(fd, buf, count);
+}
+
+ssize_t ksys_pread64(unsigned int fd, char __user *buf, size_t count,
+		     loff_t pos)
 {
 	struct fd f;
 	ssize_t ret = -EBADF;
@@ -623,8 +638,14 @@ SYSCALL_DEFINE4(pread64, unsigned int, fd, char __user *, buf,
 	return ret;
 }
 
-SYSCALL_DEFINE4(pwrite64, unsigned int, fd, const char __user *, buf,
-			 size_t, count, loff_t, pos)
+SYSCALL_DEFINE4(pread64, unsigned int, fd, char __user *, buf,
+			size_t, count, loff_t, pos)
+{
+	return ksys_pread64(fd, buf, count, pos);
+}
+
+ssize_t ksys_pwrite64(unsigned int fd, const char __user *buf,
+		      size_t count, loff_t pos)
 {
 	struct fd f;
 	ssize_t ret = -EBADF;
@@ -641,6 +662,12 @@ SYSCALL_DEFINE4(pwrite64, unsigned int, fd, const char __user *, buf,
 	}
 
 	return ret;
+}
+
+SYSCALL_DEFINE4(pwrite64, unsigned int, fd, const char __user *, buf,
+			 size_t, count, loff_t, pos)
+{
+	return ksys_pwrite64(fd, buf, count, pos);
 }
 
 static ssize_t do_iter_readv_writev(struct file *filp, struct iov_iter *iter,
@@ -759,7 +786,7 @@ ssize_t rw_copy_check_uvector(int type, const struct iovec __user * uvector,
 		goto out;
 	}
 	if (nr_segs > fast_segs) {
-		iov = kmalloc(nr_segs*sizeof(struct iovec), GFP_KERNEL);
+		iov = kmalloc_array(nr_segs, sizeof(struct iovec), GFP_KERNEL);
 		if (iov == NULL) {
 			ret = -ENOMEM;
 			goto out;
@@ -830,7 +857,7 @@ ssize_t compat_rw_copy_check_uvector(int type,
 		goto out;
 	if (nr_segs > fast_segs) {
 		ret = -ENOMEM;
-		iov = kmalloc(nr_segs*sizeof(struct iovec), GFP_KERNEL);
+		iov = kmalloc_array(nr_segs, sizeof(struct iovec), GFP_KERNEL);
 		if (iov == NULL)
 			goto out;
 	}
@@ -1799,8 +1826,8 @@ int vfs_clone_file_prep_inodes(struct inode *inode_in, loff_t pos_in,
 }
 EXPORT_SYMBOL(vfs_clone_file_prep_inodes);
 
-int vfs_clone_file_range(struct file *file_in, loff_t pos_in,
-		struct file *file_out, loff_t pos_out, u64 len)
+int do_clone_file_range(struct file *file_in, loff_t pos_in,
+			struct file *file_out, loff_t pos_out, u64 len)
 {
 	struct inode *inode_in = file_inode(file_in);
 	struct inode *inode_out = file_inode(file_out);
@@ -1844,6 +1871,19 @@ int vfs_clone_file_range(struct file *file_in, loff_t pos_in,
 		fsnotify_access(file_in);
 		fsnotify_modify(file_out);
 	}
+
+	return ret;
+}
+EXPORT_SYMBOL(do_clone_file_range);
+
+int vfs_clone_file_range(struct file *file_in, loff_t pos_in,
+			 struct file *file_out, loff_t pos_out, u64 len)
+{
+	int ret;
+
+	file_start_write(file_out);
+	ret = do_clone_file_range(file_in, pos_in, file_out, pos_out, len);
+	file_end_write(file_out);
 
 	return ret;
 }
@@ -1945,6 +1985,44 @@ out_error:
 }
 EXPORT_SYMBOL(vfs_dedupe_file_range_compare);
 
+int vfs_dedupe_file_range_one(struct file *src_file, loff_t src_pos,
+			      struct file *dst_file, loff_t dst_pos, u64 len)
+{
+	s64 ret;
+
+	ret = mnt_want_write_file(dst_file);
+	if (ret)
+		return ret;
+
+	ret = clone_verify_area(dst_file, dst_pos, len, true);
+	if (ret < 0)
+		goto out_drop_write;
+
+	ret = -EINVAL;
+	if (!(capable(CAP_SYS_ADMIN) || (dst_file->f_mode & FMODE_WRITE)))
+		goto out_drop_write;
+
+	ret = -EXDEV;
+	if (src_file->f_path.mnt != dst_file->f_path.mnt)
+		goto out_drop_write;
+
+	ret = -EISDIR;
+	if (S_ISDIR(file_inode(dst_file)->i_mode))
+		goto out_drop_write;
+
+	ret = -EINVAL;
+	if (!dst_file->f_op->dedupe_file_range)
+		goto out_drop_write;
+
+	ret = dst_file->f_op->dedupe_file_range(src_file, src_pos,
+						dst_file, dst_pos, len);
+out_drop_write:
+	mnt_drop_write_file(dst_file);
+
+	return ret;
+}
+EXPORT_SYMBOL(vfs_dedupe_file_range_one);
+
 int vfs_dedupe_file_range(struct file *file, struct file_dedupe_range *same)
 {
 	struct file_dedupe_range_info *info;
@@ -1953,11 +2031,8 @@ int vfs_dedupe_file_range(struct file *file, struct file_dedupe_range *same)
 	u64 len;
 	int i;
 	int ret;
-	bool is_admin = capable(CAP_SYS_ADMIN);
 	u16 count = same->dest_count;
-	struct file *dst_file;
-	loff_t dst_off;
-	ssize_t deduped;
+	int deduped;
 
 	if (!(file->f_mode & FMODE_READ))
 		return -EINVAL;
@@ -1984,6 +2059,9 @@ int vfs_dedupe_file_range(struct file *file, struct file_dedupe_range *same)
 	if (off + len > i_size_read(src))
 		return -EINVAL;
 
+	/* Arbitrary 1G limit on a single dedupe request, can be raised. */
+	len = min_t(u64, len, 1 << 30);
+
 	/* pre-format output fields to sane values */
 	for (i = 0; i < count; i++) {
 		same->info[i].bytes_deduped = 0ULL;
@@ -1991,57 +2069,31 @@ int vfs_dedupe_file_range(struct file *file, struct file_dedupe_range *same)
 	}
 
 	for (i = 0, info = same->info; i < count; i++, info++) {
-		struct inode *dst;
 		struct fd dst_fd = fdget(info->dest_fd);
+		struct file *dst_file = dst_fd.file;
 
-		dst_file = dst_fd.file;
 		if (!dst_file) {
 			info->status = -EBADF;
 			goto next_loop;
 		}
-		dst = file_inode(dst_file);
-
-		ret = mnt_want_write_file(dst_file);
-		if (ret) {
-			info->status = ret;
-			goto next_loop;
-		}
-
-		dst_off = info->dest_offset;
-		ret = clone_verify_area(dst_file, dst_off, len, true);
-		if (ret < 0) {
-			info->status = ret;
-			goto next_file;
-		}
-		ret = 0;
 
 		if (info->reserved) {
 			info->status = -EINVAL;
-		} else if (!(is_admin || (dst_file->f_mode & FMODE_WRITE))) {
-			info->status = -EINVAL;
-		} else if (file->f_path.mnt != dst_file->f_path.mnt) {
-			info->status = -EXDEV;
-		} else if (S_ISDIR(dst->i_mode)) {
-			info->status = -EISDIR;
-		} else if (dst_file->f_op->dedupe_file_range == NULL) {
-			info->status = -EINVAL;
-		} else {
-			deduped = dst_file->f_op->dedupe_file_range(file, off,
-							len, dst_file,
-							info->dest_offset);
-			if (deduped == -EBADE)
-				info->status = FILE_DEDUPE_RANGE_DIFFERS;
-			else if (deduped < 0)
-				info->status = deduped;
-			else
-				info->bytes_deduped += deduped;
+			goto next_fdput;
 		}
 
-next_file:
-		mnt_drop_write_file(dst_file);
-next_loop:
-		fdput(dst_fd);
+		deduped = vfs_dedupe_file_range_one(file, off, dst_file,
+						    info->dest_offset, len);
+		if (deduped == -EBADE)
+			info->status = FILE_DEDUPE_RANGE_DIFFERS;
+		else if (deduped < 0)
+			info->status = deduped;
+		else
+			info->bytes_deduped = len;
 
+next_fdput:
+		fdput(dst_fd);
+next_loop:
 		if (fatal_signal_pending(current))
 			goto out;
 	}

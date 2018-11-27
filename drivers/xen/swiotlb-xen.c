@@ -53,20 +53,6 @@
  * API.
  */
 
-#ifndef CONFIG_X86
-static unsigned long dma_alloc_coherent_mask(struct device *dev,
-					    gfp_t gfp)
-{
-	unsigned long dma_mask = 0;
-
-	dma_mask = dev->coherent_dma_mask;
-	if (!dma_mask)
-		dma_mask = (gfp & GFP_DMA) ? DMA_BIT_MASK(24) : DMA_BIT_MASK(32);
-
-	return dma_mask;
-}
-#endif
-
 #define XEN_SWIOTLB_ERROR_CODE	(~(dma_addr_t)0x0)
 
 static char *xen_io_tlb_start, *xen_io_tlb_end;
@@ -317,6 +303,9 @@ xen_swiotlb_alloc_coherent(struct device *hwdev, size_t size,
 	*/
 	flags &= ~(__GFP_DMA | __GFP_HIGHMEM);
 
+	/* Convert the size to actually allocated. */
+	size = 1UL << (order + XEN_PAGE_SHIFT);
+
 	/* On ARM this function returns an ioremap'ped virtual address for
 	 * which virt_to_phys doesn't return the corresponding physical
 	 * address. In fact on ARM virt_to_phys only works for kernel direct
@@ -328,7 +317,7 @@ xen_swiotlb_alloc_coherent(struct device *hwdev, size_t size,
 		return ret;
 
 	if (hwdev && hwdev->coherent_dma_mask)
-		dma_mask = dma_alloc_coherent_mask(hwdev, flags);
+		dma_mask = hwdev->coherent_dma_mask;
 
 	/* At this point dma_handle is the physical address, next we are
 	 * going to set it to the machine address.
@@ -365,7 +354,10 @@ xen_swiotlb_free_coherent(struct device *hwdev, size_t size, void *vaddr,
 	 * physical address */
 	phys = xen_bus_to_phys(dev_addr);
 
-	if (((dev_addr + size - 1 > dma_mask)) ||
+	/* Convert the size to actually allocated. */
+	size = 1UL << (order + XEN_PAGE_SHIFT);
+
+	if (((dev_addr + size - 1 <= dma_mask)) ||
 	    range_straddles_page_boundary(phys, size))
 		xen_destroy_contiguous_region(phys, order);
 

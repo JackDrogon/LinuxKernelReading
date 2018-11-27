@@ -6,11 +6,15 @@
  * Copyright (C) 2004 Sun Microsystems Inc.
  * Copyright (C) 2005-2016 Broadcom Corporation.
  * Copyright (C) 2016-2017 Broadcom Limited.
+ * Copyright (C) 2018 Broadcom. All Rights Reserved. The term "Broadcom"
+ * refers to Broadcom Inc. and/or its subsidiaries.
  *
  * Firmware is:
  *	Derived from proprietary unpublished source code,
  *	Copyright (C) 2000-2016 Broadcom Corporation.
  *	Copyright (C) 2016-2017 Broadcom Ltd.
+ *	Copyright (C) 2018 Broadcom. All Rights Reserved. The term "Broadcom"
+ *	refers to Broadcom Inc. and/or its subsidiaries.
  *
  *	Permission is hereby granted for the distribution of this firmware
  *	data in hexadecimal or equivalent format, provided this copyright
@@ -50,6 +54,7 @@
 #include <linux/ssb/ssb_driver_gige.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
+#include <linux/crc32poly.h>
 
 #include <net/checksum.h>
 #include <net/ip.h>
@@ -721,6 +726,7 @@ static int tg3_ape_lock(struct tg3 *tp, int locknum)
 	case TG3_APE_LOCK_GPIO:
 		if (tg3_asic_rev(tp) == ASIC_REV_5761)
 			return 0;
+		/* else: fall through */
 	case TG3_APE_LOCK_GRC:
 	case TG3_APE_LOCK_MEM:
 		if (!tp->pci_fn)
@@ -781,6 +787,7 @@ static void tg3_ape_unlock(struct tg3 *tp, int locknum)
 	case TG3_APE_LOCK_GPIO:
 		if (tg3_asic_rev(tp) == ASIC_REV_5761)
 			return;
+		/* else: fall through */
 	case TG3_APE_LOCK_GRC:
 	case TG3_APE_LOCK_MEM:
 		if (!tp->pci_fn)
@@ -8631,8 +8638,9 @@ static int tg3_mem_tx_acquire(struct tg3 *tp)
 		tnapi++;
 
 	for (i = 0; i < tp->txq_cnt; i++, tnapi++) {
-		tnapi->tx_buffers = kzalloc(sizeof(struct tg3_tx_ring_info) *
-					    TG3_TX_RING_SIZE, GFP_KERNEL);
+		tnapi->tx_buffers = kcalloc(TG3_TX_RING_SIZE,
+					    sizeof(struct tg3_tx_ring_info),
+					    GFP_KERNEL);
 		if (!tnapi->tx_buffers)
 			goto err_out;
 
@@ -9289,6 +9297,15 @@ static int tg3_chip_reset(struct tg3 *tp)
 
 	tg3_restore_clk(tp);
 
+	/* Increase the core clock speed to fix tx timeout issue for 5762
+	 * with 100Mbps link speed.
+	 */
+	if (tg3_asic_rev(tp) == ASIC_REV_5762) {
+		val = tr32(TG3_CPMU_CLCK_ORIDE_ENABLE);
+		tw32(TG3_CPMU_CLCK_ORIDE_ENABLE, val |
+		     TG3_CPMU_MAC_ORIDE_ENABLE);
+	}
+
 	/* Reprobe ASF enable state.  */
 	tg3_flag_clear(tp, ENABLE_ASF);
 	tp->phy_flags &= ~(TG3_PHYFLG_1G_ON_VAUX_OK |
@@ -9706,7 +9723,7 @@ static inline u32 calc_crc(unsigned char *buf, int len)
 			reg >>= 1;
 
 			if (tmp)
-				reg ^= 0xedb88320;
+				reg ^= CRC32_POLY_LE;
 		}
 	}
 
@@ -10705,28 +10722,40 @@ static int tg3_reset_hw(struct tg3 *tp, bool reset_phy)
 	switch (limit) {
 	case 16:
 		tw32(MAC_RCV_RULE_15,  0); tw32(MAC_RCV_VALUE_15,  0);
+		/* fall through */
 	case 15:
 		tw32(MAC_RCV_RULE_14,  0); tw32(MAC_RCV_VALUE_14,  0);
+		/* fall through */
 	case 14:
 		tw32(MAC_RCV_RULE_13,  0); tw32(MAC_RCV_VALUE_13,  0);
+		/* fall through */
 	case 13:
 		tw32(MAC_RCV_RULE_12,  0); tw32(MAC_RCV_VALUE_12,  0);
+		/* fall through */
 	case 12:
 		tw32(MAC_RCV_RULE_11,  0); tw32(MAC_RCV_VALUE_11,  0);
+		/* fall through */
 	case 11:
 		tw32(MAC_RCV_RULE_10,  0); tw32(MAC_RCV_VALUE_10,  0);
+		/* fall through */
 	case 10:
 		tw32(MAC_RCV_RULE_9,  0); tw32(MAC_RCV_VALUE_9,  0);
+		/* fall through */
 	case 9:
 		tw32(MAC_RCV_RULE_8,  0); tw32(MAC_RCV_VALUE_8,  0);
+		/* fall through */
 	case 8:
 		tw32(MAC_RCV_RULE_7,  0); tw32(MAC_RCV_VALUE_7,  0);
+		/* fall through */
 	case 7:
 		tw32(MAC_RCV_RULE_6,  0); tw32(MAC_RCV_VALUE_6,  0);
+		/* fall through */
 	case 6:
 		tw32(MAC_RCV_RULE_5,  0); tw32(MAC_RCV_VALUE_5,  0);
+		/* fall through */
 	case 5:
 		tw32(MAC_RCV_RULE_4,  0); tw32(MAC_RCV_VALUE_4,  0);
+		/* fall through */
 	case 4:
 		/* tw32(MAC_RCV_RULE_3,  0); tw32(MAC_RCV_VALUE_3,  0); */
 	case 3:
@@ -10800,11 +10829,11 @@ static ssize_t tg3_show_temp(struct device *dev,
 }
 
 
-static SENSOR_DEVICE_ATTR(temp1_input, S_IRUGO, tg3_show_temp, NULL,
+static SENSOR_DEVICE_ATTR(temp1_input, 0444, tg3_show_temp, NULL,
 			  TG3_TEMP_SENSOR_OFFSET);
-static SENSOR_DEVICE_ATTR(temp1_crit, S_IRUGO, tg3_show_temp, NULL,
+static SENSOR_DEVICE_ATTR(temp1_crit, 0444, tg3_show_temp, NULL,
 			  TG3_TEMP_CAUTION_OFFSET);
-static SENSOR_DEVICE_ATTR(temp1_max, S_IRUGO, tg3_show_temp, NULL,
+static SENSOR_DEVICE_ATTR(temp1_max, 0444, tg3_show_temp, NULL,
 			  TG3_TEMP_MAX_OFFSET);
 
 static struct attribute *tg3_attrs[] = {
@@ -12397,6 +12426,7 @@ static int tg3_set_ringparam(struct net_device *dev, struct ethtool_ringparam *e
 {
 	struct tg3 *tp = netdev_priv(dev);
 	int i, irq_sync = 0, err = 0;
+	bool reset_phy = false;
 
 	if ((ering->rx_pending > tp->rx_std_ring_mask) ||
 	    (ering->rx_jumbo_pending > tp->rx_jmb_ring_mask) ||
@@ -12428,7 +12458,13 @@ static int tg3_set_ringparam(struct net_device *dev, struct ethtool_ringparam *e
 
 	if (netif_running(dev)) {
 		tg3_halt(tp, RESET_KIND_SHUTDOWN, 1);
-		err = tg3_restart_hw(tp, false);
+		/* Reset PHY to avoid PHY lock up */
+		if (tg3_asic_rev(tp) == ASIC_REV_5717 ||
+		    tg3_asic_rev(tp) == ASIC_REV_5719 ||
+		    tg3_asic_rev(tp) == ASIC_REV_5720)
+			reset_phy = true;
+
+		err = tg3_restart_hw(tp, reset_phy);
 		if (!err)
 			tg3_netif_start(tp);
 	}
@@ -12462,6 +12498,7 @@ static int tg3_set_pauseparam(struct net_device *dev, struct ethtool_pauseparam 
 {
 	struct tg3 *tp = netdev_priv(dev);
 	int err = 0;
+	bool reset_phy = false;
 
 	if (tp->link_config.autoneg == AUTONEG_ENABLE)
 		tg3_warn_mgmt_link_flap(tp);
@@ -12552,7 +12589,13 @@ static int tg3_set_pauseparam(struct net_device *dev, struct ethtool_pauseparam 
 
 		if (netif_running(dev)) {
 			tg3_halt(tp, RESET_KIND_SHUTDOWN, 1);
-			err = tg3_restart_hw(tp, false);
+			/* Reset PHY to avoid PHY lock up */
+			if (tg3_asic_rev(tp) == ASIC_REV_5717 ||
+			    tg3_asic_rev(tp) == ASIC_REV_5719 ||
+			    tg3_asic_rev(tp) == ASIC_REV_5720)
+				reset_phy = true;
+
+			err = tg3_restart_hw(tp, reset_phy);
 			if (!err)
 				tg3_netif_start(tp);
 		}

@@ -98,8 +98,8 @@ nfs_page_free(struct nfs_page *p)
 int
 nfs_iocounter_wait(struct nfs_lock_context *l_ctx)
 {
-	return wait_on_atomic_t(&l_ctx->io_count, nfs_wait_atomic_killable,
-			TASK_KILLABLE);
+	return wait_var_event_killable(&l_ctx->io_count,
+				       !atomic_read(&l_ctx->io_count));
 }
 
 /**
@@ -395,7 +395,7 @@ static void nfs_clear_request(struct nfs_page *req)
 	}
 	if (l_ctx != NULL) {
 		if (atomic_dec_and_test(&l_ctx->io_count)) {
-			wake_up_atomic_t(&l_ctx->io_count);
+			wake_up_var(&l_ctx->io_count);
 			if (test_bit(NFS_CONTEXT_UNLOCK, &ctx->flags))
 				rpc_wake_up(&NFS_SERVER(d_inode(ctx->dentry))->uoc_rpcwaitq);
 		}
@@ -561,6 +561,7 @@ static void nfs_pgio_rpcsetup(struct nfs_pgio_header *hdr,
 	case FLUSH_COND_STABLE:
 		if (nfs_reqs_to_commit(cinfo))
 			break;
+		/* fall through */
 	default:
 		hdr->args.stable = NFS_FILE_SYNC;
 	}
@@ -1110,6 +1111,20 @@ static int nfs_pageio_add_request_mirror(struct nfs_pageio_descriptor *desc,
 	return ret;
 }
 
+static void nfs_pageio_error_cleanup(struct nfs_pageio_descriptor *desc)
+{
+	u32 midx;
+	struct nfs_pgio_mirror *mirror;
+
+	if (!desc->pg_error)
+		return;
+
+	for (midx = 0; midx < desc->pg_mirror_count; midx++) {
+		mirror = &desc->pg_mirrors[midx];
+		desc->pg_completion_ops->error_cleanup(&mirror->pg_list);
+	}
+}
+
 int nfs_pageio_add_request(struct nfs_pageio_descriptor *desc,
 			   struct nfs_page *req)
 {
@@ -1160,25 +1175,11 @@ int nfs_pageio_add_request(struct nfs_pageio_descriptor *desc,
 	return 1;
 
 out_failed:
-	/*
-	 * We might have failed before sending any reqs over wire.
-	 * Clean up rest of the reqs in mirror pg_list.
-	 */
-	if (desc->pg_error) {
-		struct nfs_pgio_mirror *mirror;
-		void (*func)(struct list_head *);
-
-		/* remember fatal errors */
-		if (nfs_error_is_fatal(desc->pg_error))
-			nfs_context_set_write_error(req->wb_context,
-						    desc->pg_error);
-
-		func = desc->pg_completion_ops->error_cleanup;
-		for (midx = 0; midx < desc->pg_mirror_count; midx++) {
-			mirror = &desc->pg_mirrors[midx];
-			func(&mirror->pg_list);
-		}
-	}
+	/* remember fatal errors */
+	if (nfs_error_is_fatal(desc->pg_error))
+		nfs_context_set_write_error(req->wb_context,
+						desc->pg_error);
+	nfs_pageio_error_cleanup(desc);
 	return 0;
 }
 
@@ -1250,6 +1251,8 @@ void nfs_pageio_complete(struct nfs_pageio_descriptor *desc)
 	for (midx = 0; midx < desc->pg_mirror_count; midx++)
 		nfs_pageio_complete_mirror(desc, midx);
 
+	if (desc->pg_error < 0)
+		nfs_pageio_error_cleanup(desc);
 	if (desc->pg_ops->pg_cleanup)
 		desc->pg_ops->pg_cleanup(desc);
 	nfs_pageio_cleanup_mirroring(desc);

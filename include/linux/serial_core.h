@@ -127,6 +127,13 @@ struct uart_port {
 					     struct ktermios *);
 	unsigned int		(*get_mctrl)(struct uart_port *);
 	void			(*set_mctrl)(struct uart_port *, unsigned int);
+	unsigned int		(*get_divisor)(struct uart_port *,
+					       unsigned int baud,
+					       unsigned int *frac);
+	void			(*set_divisor)(struct uart_port *,
+					       unsigned int baud,
+					       unsigned int quot,
+					       unsigned int quot_frac);
 	int			(*startup)(struct uart_port *port);
 	void			(*shutdown)(struct uart_port *port);
 	void			(*throttle)(struct uart_port *port);
@@ -233,6 +240,7 @@ struct uart_port {
 #define UPSTAT_AUTORTS		((__force upstat_t) (1 << 2))
 #define UPSTAT_AUTOCTS		((__force upstat_t) (1 << 3))
 #define UPSTAT_AUTOXOFF		((__force upstat_t) (1 << 4))
+#define UPSTAT_SYNC_FIFO	((__force upstat_t) (1 << 5))
 
 	int			hw_stopped;		/* sw-assisted CTS flow state */
 	unsigned int		mctrl;			/* current modem ctrl settings */
@@ -348,7 +356,8 @@ struct earlycon_device {
 };
 
 struct earlycon_id {
-	char	name[16];
+	char	name[15];
+	char	name_term;	/* In case compiler didn't '\0' term name */
 	char	compatible[128];
 	int	(*setup)(struct earlycon_device *, const char *options);
 };
@@ -386,7 +395,7 @@ extern int of_setup_earlycon(const struct earlycon_id *match,
 extern bool earlycon_acpi_spcr_enable __initdata;
 int setup_earlycon(char *buf);
 #else
-static const bool earlycon_acpi_spcr_enable;
+static const bool earlycon_acpi_spcr_enable EARLYCON_USED_OR_UNUSED;
 static inline int setup_earlycon(char *buf) { return 0; }
 #endif
 

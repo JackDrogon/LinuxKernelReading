@@ -758,8 +758,13 @@ static int powernv_cpufreq_target_index(struct cpufreq_policy *policy,
 
 	cur_msec = jiffies_to_msecs(get_jiffies_64());
 
-	spin_lock(&gpstates->gpstate_lock);
 	freq_data.pstate_id = idx_to_pstate(new_index);
+	if (!gpstates) {
+		freq_data.gpstate_id = freq_data.pstate_id;
+		goto no_gpstate;
+	}
+
+	spin_lock(&gpstates->gpstate_lock);
 
 	if (!gpstates->last_sampled_time) {
 		gpstate_idx = new_index;
@@ -809,6 +814,7 @@ gpstates_done:
 
 	spin_unlock(&gpstates->gpstate_lock);
 
+no_gpstate:
 	/*
 	 * Use smp_call_function to send IPI and execute the
 	 * mtspr on target CPU.  We could do that without IPI
@@ -820,7 +826,7 @@ gpstates_done:
 
 static int powernv_cpufreq_cpu_init(struct cpufreq_policy *policy)
 {
-	int base, i, ret;
+	int base, i;
 	struct kernfs_node *kn;
 	struct global_pstate_info *gpstates;
 
@@ -843,6 +849,13 @@ static int powernv_cpufreq_cpu_init(struct cpufreq_policy *policy)
 		kernfs_put(kn);
 	}
 
+	policy->freq_table = powernv_freqs;
+	policy->fast_switch_possible = true;
+
+	if (pvr_version_is(PVR_POWER9))
+		return 0;
+
+	/* Initialise Gpstate ramp-down timer only on POWER8 */
 	gpstates =  kzalloc(sizeof(*gpstates), GFP_KERNEL);
 	if (!gpstates)
 		return -ENOMEM;
@@ -856,15 +869,8 @@ static int powernv_cpufreq_cpu_init(struct cpufreq_policy *policy)
 	gpstates->timer.expires = jiffies +
 				msecs_to_jiffies(GPSTATE_TIMER_INTERVAL);
 	spin_lock_init(&gpstates->gpstate_lock);
-	ret = cpufreq_table_validate_and_show(policy, powernv_freqs);
 
-	if (ret < 0) {
-		kfree(policy->driver_data);
-		return ret;
-	}
-
-	policy->fast_switch_possible = true;
-	return ret;
+	return 0;
 }
 
 static int powernv_cpufreq_cpu_exit(struct cpufreq_policy *policy)
@@ -1003,7 +1009,8 @@ static void powernv_cpufreq_stop_cpu(struct cpufreq_policy *policy)
 	freq_data.pstate_id = idx_to_pstate(powernv_pstate_info.min);
 	freq_data.gpstate_id = idx_to_pstate(powernv_pstate_info.min);
 	smp_call_function_single(policy->cpu, set_pstate, &freq_data, 1);
-	del_timer_sync(&gpstates->timer);
+	if (gpstates)
+		del_timer_sync(&gpstates->timer);
 }
 
 static unsigned int powernv_fast_switch(struct cpufreq_policy *policy,

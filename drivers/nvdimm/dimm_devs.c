@@ -133,7 +133,7 @@ int nvdimm_init_config_data(struct nvdimm_drvdata *ndd)
 		}
 		memcpy(ndd->data + offset, cmd->out_buf, cmd->in_length);
 	}
-	dev_dbg(ndd->dev, "%s: len: %zu rc: %d\n", __func__, offset, rc);
+	dev_dbg(ndd->dev, "len: %zu rc: %d\n", offset, rc);
 	kfree(cmd);
 
 	return rc;
@@ -268,8 +268,7 @@ void nvdimm_drvdata_release(struct kref *kref)
 	struct device *dev = ndd->dev;
 	struct resource *res, *_r;
 
-	dev_dbg(dev, "%s\n", __func__);
-
+	dev_dbg(dev, "trace\n");
 	nvdimm_bus_lock(dev);
 	for_each_dpa_resource_safe(ndd, res, _r)
 		nvdimm_free_dpa(ndd, res);
@@ -538,6 +537,37 @@ resource_size_t nd_blk_available_dpa(struct nd_region *nd_region)
 }
 
 /**
+ * nd_pmem_max_contiguous_dpa - For the given dimm+region, return the max
+ *			   contiguous unallocated dpa range.
+ * @nd_region: constrain available space check to this reference region
+ * @nd_mapping: container of dpa-resource-root + labels
+ */
+resource_size_t nd_pmem_max_contiguous_dpa(struct nd_region *nd_region,
+					   struct nd_mapping *nd_mapping)
+{
+	struct nvdimm_drvdata *ndd = to_ndd(nd_mapping);
+	struct nvdimm_bus *nvdimm_bus;
+	resource_size_t max = 0;
+	struct resource *res;
+
+	/* if a dimm is disabled the available capacity is zero */
+	if (!ndd)
+		return 0;
+
+	nvdimm_bus = walk_to_nvdimm_bus(ndd->dev);
+	if (__reserve_free_pmem(&nd_region->dev, nd_mapping->nvdimm))
+		return 0;
+	for_each_dpa_resource(ndd, res) {
+		if (strcmp(res->name, "pmem-reserve") != 0)
+			continue;
+		if (resource_size(res) > max)
+			max = resource_size(res);
+	}
+	release_free_pmem(nvdimm_bus, nd_mapping);
+	return max;
+}
+
+/**
  * nd_pmem_available_dpa - for the given dimm+region account unallocated dpa
  * @nd_mapping: container of dpa-resource-root + labels
  * @nd_region: constrain available space check to this reference region
@@ -662,7 +692,7 @@ int nvdimm_bus_check_dimm_count(struct nvdimm_bus *nvdimm_bus, int dimm_count)
 	nd_synchronize();
 
 	device_for_each_child(&nvdimm_bus->dev, &count, count_dimms);
-	dev_dbg(&nvdimm_bus->dev, "%s: count: %d\n", __func__, count);
+	dev_dbg(&nvdimm_bus->dev, "count: %d\n", count);
 	if (count != dimm_count)
 		return -ENXIO;
 	return 0;

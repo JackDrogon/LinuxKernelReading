@@ -209,12 +209,17 @@ static int sctp_v6_xmit(struct sk_buff *skb, struct sctp_transport *transport)
 	struct sock *sk = skb->sk;
 	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct flowi6 *fl6 = &transport->fl.u.ip6;
+	__u8 tclass = np->tclass;
 	int res;
 
 	pr_debug("%s: skb:%p, len:%d, src:%pI6 dst:%pI6\n", __func__, skb,
 		 skb->len, &fl6->saddr, &fl6->daddr);
 
-	IP6_ECN_flow_xmit(sk, fl6->flowlabel);
+	if (transport->dscp & SCTP_DSCP_SET_MASK)
+		tclass = transport->dscp & SCTP_DSCP_VAL_MASK;
+
+	if (INET_ECN_is_capable(tclass))
+		IP6_ECN_flow_xmit(sk, fl6->flowlabel);
 
 	if (!(transport->param_flags & SPP_PMTUD_ENABLE))
 		skb->ignore_df = 1;
@@ -223,7 +228,7 @@ static int sctp_v6_xmit(struct sk_buff *skb, struct sctp_transport *transport)
 
 	rcu_read_lock();
 	res = ip6_xmit(sk, skb, fl6, sk->sk_mark, rcu_dereference(np->opt),
-		       np->tclass);
+		       tclass);
 	rcu_read_unlock();
 	return res;
 }
@@ -254,6 +259,17 @@ static void sctp_v6_get_dst(struct sctp_transport *t, union sctp_addr *saddr,
 		fl6->flowi6_oif = daddr->v6.sin6_scope_id;
 	else if (asoc)
 		fl6->flowi6_oif = asoc->base.sk->sk_bound_dev_if;
+	if (t->flowlabel & SCTP_FLOWLABEL_SET_MASK)
+		fl6->flowlabel = htonl(t->flowlabel & SCTP_FLOWLABEL_VAL_MASK);
+
+	if (np->sndflow && (fl6->flowlabel & IPV6_FLOWLABEL_MASK)) {
+		struct ip6_flowlabel *flowlabel;
+
+		flowlabel = fl6_sock_lookup(sk, fl6->flowlabel);
+		if (!flowlabel)
+			goto out;
+		fl6_sock_release(flowlabel);
+	}
 
 	pr_debug("%s: dst=%pI6 ", __func__, &fl6->daddr);
 
@@ -425,6 +441,41 @@ static void sctp_v6_copy_addrlist(struct list_head *addrlist,
 
 	read_unlock_bh(&in6_dev->lock);
 	rcu_read_unlock();
+}
+
+/* Copy over any ip options */
+static void sctp_v6_copy_ip_options(struct sock *sk, struct sock *newsk)
+{
+	struct ipv6_pinfo *newnp, *np = inet6_sk(sk);
+	struct ipv6_txoptions *opt;
+
+	newnp = inet6_sk(newsk);
+
+	rcu_read_lock();
+	opt = rcu_dereference(np->opt);
+	if (opt) {
+		opt = ipv6_dup_options(newsk, opt);
+		if (!opt)
+			pr_err("%s: Failed to copy ip options\n", __func__);
+	}
+	RCU_INIT_POINTER(newnp->opt, opt);
+	rcu_read_unlock();
+}
+
+/* Account for the IP options */
+static int sctp_v6_ip_options_len(struct sock *sk)
+{
+	struct ipv6_pinfo *np = inet6_sk(sk);
+	struct ipv6_txoptions *opt;
+	int len = 0;
+
+	rcu_read_lock();
+	opt = rcu_dereference(np->opt);
+	if (opt)
+		len = opt->opt_flen + opt->opt_nflen;
+
+	rcu_read_unlock();
+	return len;
 }
 
 /* Initialize a sockaddr_storage from in incoming skb. */
@@ -669,7 +720,6 @@ static struct sock *sctp_v6_create_accept_sk(struct sock *sk,
 	struct sock *newsk;
 	struct ipv6_pinfo *newnp, *np = inet6_sk(sk);
 	struct sctp6_sock *newsctp6sk;
-	struct ipv6_txoptions *opt;
 
 	newsk = sk_alloc(sock_net(sk), PF_INET6, GFP_KERNEL, sk->sk_prot, kern);
 	if (!newsk)
@@ -692,12 +742,7 @@ static struct sock *sctp_v6_create_accept_sk(struct sock *sk,
 	newnp->ipv6_ac_list = NULL;
 	newnp->ipv6_fl_list = NULL;
 
-	rcu_read_lock();
-	opt = rcu_dereference(np->opt);
-	if (opt)
-		opt = ipv6_dup_options(newsk, opt);
-	RCU_INIT_POINTER(newnp->opt, opt);
-	rcu_read_unlock();
+	sctp_v6_copy_ip_options(sk, newsk);
 
 	/* Initialize sk's sport, dport, rcv_saddr and daddr for getsockname()
 	 * and getpeername().
@@ -957,16 +1002,16 @@ static int sctp_inet6_supported_addrs(const struct sctp_sock *opt,
 
 /* Handle SCTP_I_WANT_MAPPED_V4_ADDR for getpeername() and getsockname() */
 static int sctp_getname(struct socket *sock, struct sockaddr *uaddr,
-			int *uaddr_len, int peer)
+			int peer)
 {
 	int rc;
 
-	rc = inet6_getname(sock, uaddr, uaddr_len, peer);
+	rc = inet6_getname(sock, uaddr, peer);
 
-	if (rc != 0)
+	if (rc < 0)
 		return rc;
 
-	*uaddr_len = sctp_v6_addr_to_user(sctp_sk(sock->sk),
+	rc = sctp_v6_addr_to_user(sctp_sk(sock->sk),
 					  (union sctp_addr *)uaddr);
 
 	return rc;
@@ -977,7 +1022,7 @@ static const struct proto_ops inet6_seqpacket_ops = {
 	.owner		   = THIS_MODULE,
 	.release	   = inet6_release,
 	.bind		   = inet6_bind,
-	.connect	   = inet_dgram_connect,
+	.connect	   = sctp_inet_connect,
 	.socketpair	   = sock_no_socketpair,
 	.accept		   = inet_accept,
 	.getname	   = sctp_getname,
@@ -1046,6 +1091,7 @@ static struct sctp_af sctp_af_inet6 = {
 	.ecn_capable	   = sctp_v6_ecn_capable,
 	.net_header_len	   = sizeof(struct ipv6hdr),
 	.sockaddr_len	   = sizeof(struct sockaddr_in6),
+	.ip_options_len	   = sctp_v6_ip_options_len,
 #ifdef CONFIG_COMPAT
 	.compat_setsockopt = compat_ipv6_setsockopt,
 	.compat_getsockopt = compat_ipv6_getsockopt,
@@ -1064,6 +1110,7 @@ static struct sctp_pf sctp_pf_inet6 = {
 	.addr_to_user  = sctp_v6_addr_to_user,
 	.to_sk_saddr   = sctp_v6_to_sk_saddr,
 	.to_sk_daddr   = sctp_v6_to_sk_daddr,
+	.copy_ip_options = sctp_v6_copy_ip_options,
 	.af            = &sctp_af_inet6,
 };
 

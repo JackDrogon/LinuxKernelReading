@@ -27,7 +27,8 @@ static struct bio *blk_bio_discard_split(struct request_queue *q,
 	/* Zero-sector (unknown) and one-sector granularities are the same.  */
 	granularity = max(q->limits.discard_granularity >> 9, 1U);
 
-	max_discard_sectors = min(q->limits.max_discard_sectors, UINT_MAX >> 9);
+	max_discard_sectors = min(q->limits.max_discard_sectors,
+			bio_allowed_max_sectors(q));
 	max_discard_sectors -= max_discard_sectors % granularity;
 
 	if (unlikely(!max_discard_sectors)) {
@@ -188,16 +189,16 @@ void blk_queue_split(struct request_queue *q, struct bio **bio)
 	switch (bio_op(*bio)) {
 	case REQ_OP_DISCARD:
 	case REQ_OP_SECURE_ERASE:
-		split = blk_bio_discard_split(q, *bio, q->bio_split, &nsegs);
+		split = blk_bio_discard_split(q, *bio, &q->bio_split, &nsegs);
 		break;
 	case REQ_OP_WRITE_ZEROES:
-		split = blk_bio_write_zeroes_split(q, *bio, q->bio_split, &nsegs);
+		split = blk_bio_write_zeroes_split(q, *bio, &q->bio_split, &nsegs);
 		break;
 	case REQ_OP_WRITE_SAME:
-		split = blk_bio_write_same_split(q, *bio, q->bio_split, &nsegs);
+		split = blk_bio_write_same_split(q, *bio, &q->bio_split, &nsegs);
 		break;
 	default:
-		split = blk_bio_segment_split(q, *bio, q->bio_split, &nsegs);
+		split = blk_bio_segment_split(q, *bio, &q->bio_split, &nsegs);
 		break;
 	}
 
@@ -209,6 +210,16 @@ void blk_queue_split(struct request_queue *q, struct bio **bio)
 	if (split) {
 		/* there isn't chance to merge the splitted bio */
 		split->bi_opf |= REQ_NOMERGE;
+
+		/*
+		 * Since we're recursing into make_request here, ensure
+		 * that we mark this bio as already having entered the queue.
+		 * If not, and the queue is going away, we can get stuck
+		 * forever on waiting for the queue reference to drop. But
+		 * that will never happen, as we're already holding a
+		 * reference to it.
+		 */
+		bio_set_flag(*bio, BIO_QUEUE_ENTERED);
 
 		bio_chain(split, *bio);
 		trace_block_split(q, split, (*bio)->bi_iter.bi_sector);
@@ -724,13 +735,12 @@ static struct request *attempt_merge(struct request_queue *q,
 	}
 
 	/*
-	 * At this point we have either done a back merge
-	 * or front merge. We need the smaller start_time of
-	 * the merged requests to be the current request
-	 * for accounting purposes.
+	 * At this point we have either done a back merge or front merge. We
+	 * need the smaller start_time_ns of the merged requests to be the
+	 * current request for accounting purposes.
 	 */
-	if (time_after(req->start_time, next->start_time))
-		req->start_time = next->start_time;
+	if (next->start_time_ns < req->start_time_ns)
+		req->start_time_ns = next->start_time_ns;
 
 	req->biotail->bi_next = next->bio;
 	req->biotail = next->biotail;

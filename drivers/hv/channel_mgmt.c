@@ -527,10 +527,8 @@ static void vmbus_process_offer(struct vmbus_channel *newchannel)
 		struct hv_device *dev
 			= newchannel->primary_channel->device_obj;
 
-		if (vmbus_add_channel_kobj(dev, newchannel)) {
-			atomic_dec(&vmbus_connection.offer_in_progress);
+		if (vmbus_add_channel_kobj(dev, newchannel))
 			goto err_free_chan;
-		}
 
 		if (channel->sc_creation_callback != NULL)
 			channel->sc_creation_callback(newchannel);
@@ -596,10 +594,8 @@ static int next_numa_node_id;
 /*
  * Starting with Win8, we can statically distribute the incoming
  * channel interrupt load by binding a channel to VCPU.
- * We do this in a hierarchical fashion:
- * First distribute the primary channels across available NUMA nodes
- * and then distribute the subchannels amongst the CPUs in the NUMA
- * node assigned to the primary channel.
+ * We distribute the interrupt loads to one or more NUMA nodes based on
+ * the channel's affinity_policy.
  *
  * For pre-win8 hosts or non-performance critical channels we assign the
  * first CPU in the first NUMA node.
@@ -610,16 +606,18 @@ static void init_vp_index(struct vmbus_channel *channel, u16 dev_type)
 	bool perf_chn = vmbus_devs[dev_type].perf_device;
 	struct vmbus_channel *primary = channel->primary_channel;
 	int next_node;
-	struct cpumask available_mask;
+	cpumask_var_t available_mask;
 	struct cpumask *alloced_mask;
 
 	if ((vmbus_proto_version == VERSION_WS2008) ||
-	    (vmbus_proto_version == VERSION_WIN7) || (!perf_chn)) {
+	    (vmbus_proto_version == VERSION_WIN7) || (!perf_chn) ||
+	    !alloc_cpumask_var(&available_mask, GFP_KERNEL)) {
 		/*
 		 * Prior to win8, all channel interrupts are
 		 * delivered on cpu 0.
 		 * Also if the channel is not a performance critical
 		 * channel, bind it to cpu 0.
+		 * In case alloc_cpumask_var() fails, bind it to cpu 0.
 		 */
 		channel->numa_node = 0;
 		channel->target_cpu = 0;
@@ -657,7 +655,7 @@ static void init_vp_index(struct vmbus_channel *channel, u16 dev_type)
 		cpumask_clear(alloced_mask);
 	}
 
-	cpumask_xor(&available_mask, alloced_mask,
+	cpumask_xor(available_mask, alloced_mask,
 		    cpumask_of_node(primary->numa_node));
 
 	cur_cpu = -1;
@@ -675,10 +673,10 @@ static void init_vp_index(struct vmbus_channel *channel, u16 dev_type)
 	}
 
 	while (true) {
-		cur_cpu = cpumask_next(cur_cpu, &available_mask);
+		cur_cpu = cpumask_next(cur_cpu, available_mask);
 		if (cur_cpu >= nr_cpu_ids) {
 			cur_cpu = -1;
-			cpumask_copy(&available_mask,
+			cpumask_copy(available_mask,
 				     cpumask_of_node(primary->numa_node));
 			continue;
 		}
@@ -708,6 +706,8 @@ static void init_vp_index(struct vmbus_channel *channel, u16 dev_type)
 
 	channel->target_cpu = cur_cpu;
 	channel->target_vp = hv_cpu_number_to_vp_number(cur_cpu);
+
+	free_cpumask_var(available_mask);
 }
 
 static void vmbus_wait_for_unload(void)
@@ -895,6 +895,12 @@ static void vmbus_onoffer_rescind(struct vmbus_channel_message_header *hdr)
 		 */
 		return;
 	}
+
+	/*
+	 * Before setting channel->rescind in vmbus_rescind_cleanup(), we
+	 * should make sure the channel callback is not running any more.
+	 */
+	vmbus_reset_channel_cb(channel);
 
 	/*
 	 * Now wait for offer handling to complete.

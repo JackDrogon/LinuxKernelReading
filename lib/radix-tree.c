@@ -120,7 +120,7 @@ bool is_sibling_entry(const struct radix_tree_node *parent, void *node)
 static inline unsigned long
 get_slot_offset(const struct radix_tree_node *parent, void __rcu **slot)
 {
-	return slot - parent->slots;
+	return parent ? slot - parent->slots : 0;
 }
 
 static unsigned int radix_tree_descend(const struct radix_tree_node *parent,
@@ -146,7 +146,7 @@ static unsigned int radix_tree_descend(const struct radix_tree_node *parent,
 
 static inline gfp_t root_gfp_mask(const struct radix_tree_root *root)
 {
-	return root->gfp_mask & __GFP_BITS_MASK;
+	return root->gfp_mask & (__GFP_BITS_MASK & ~GFP_ZONEMASK);
 }
 
 static inline void tag_set(struct radix_tree_node *node, unsigned int tag,
@@ -2034,10 +2034,12 @@ void *radix_tree_delete_item(struct radix_tree_root *root,
 			     unsigned long index, void *item)
 {
 	struct radix_tree_node *node = NULL;
-	void __rcu **slot;
+	void __rcu **slot = NULL;
 	void *entry;
 
 	entry = __radix_tree_lookup(root, index, &node, &slot);
+	if (!slot)
+		return NULL;
 	if (!entry && (!is_idr(root) || node_tag_get(root, node, IDR_FREE,
 						get_slot_offset(node, slot))))
 		return NULL;
@@ -2104,14 +2106,6 @@ void idr_preload(gfp_t gfp_mask)
 }
 EXPORT_SYMBOL(idr_preload);
 
-/**
- * ida_pre_get - reserve resources for ida allocation
- * @ida: ida handle
- * @gfp: memory allocation flags
- *
- * This function should be called before calling ida_get_new_above().  If it
- * is unable to allocate memory, it will return %0.  On success, it returns %1.
- */
 int ida_pre_get(struct ida *ida, gfp_t gfp)
 {
 	/*
@@ -2132,7 +2126,6 @@ int ida_pre_get(struct ida *ida, gfp_t gfp)
 
 	return 1;
 }
-EXPORT_SYMBOL(ida_pre_get);
 
 void __rcu **idr_get_free(struct radix_tree_root *root,
 			      struct radix_tree_iter *iter, gfp_t gfp,
@@ -2283,6 +2276,7 @@ void __init radix_tree_init(void)
 	int ret;
 
 	BUILD_BUG_ON(RADIX_TREE_MAX_TAGS + __GFP_BITS_SHIFT > 32);
+	BUILD_BUG_ON(ROOT_IS_IDR & ~GFP_ZONEMASK);
 	radix_tree_node_cachep = kmem_cache_create("radix_tree_node",
 			sizeof(struct radix_tree_node), 0,
 			SLAB_PANIC | SLAB_RECLAIM_ACCOUNT,
