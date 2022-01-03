@@ -30,7 +30,6 @@
 #include <asm/ucontext.h>
 #include <asm/rt_sigframe.h>
 #include <linux/uaccess.h>
-#include <asm/pgalloc.h>
 #include <asm/cacheflush.h>
 #include <asm/asm-offsets.h>
 
@@ -65,7 +64,6 @@
 #define INSN_LDI_R25_1	 0x34190002 /* ldi  1,%r25 (in_syscall=1) */
 #define INSN_LDI_R20	 0x3414015a /* ldi  __NR_rt_sigreturn,%r20 */
 #define INSN_BLE_SR2_R0  0xe4008200 /* be,l 0x100(%sr2,%r0),%sr0,%r31 */
-#define INSN_NOP	 0x08000240 /* nop */
 /* For debugging */
 #define INSN_DIE_HORRIBLY 0x68000ccc /* stw %r0,0x666(%sr0,%r0) */
 
@@ -165,7 +163,7 @@ sys_rt_sigreturn(struct pt_regs *regs, int in_syscall)
 
 give_sigsegv:
 	DBG(1,"sys_rt_sigreturn: Sending SIGSEGV\n");
-	force_sig(SIGSEGV, current);
+	force_sig(SIGSEGV);
 	return;
 }
 
@@ -239,12 +237,22 @@ setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
 #endif
 	
 	usp = (regs->gr[30] & ~(0x01UL));
-	/*FIXME: frame_size parameter is unused, remove it. */
-	frame = get_sigframe(&ksig->ka, usp, sizeof(*frame));
+	sigframe_size = PARISC_RT_SIGFRAME_SIZE;
+#ifdef CONFIG_64BIT
+	if (is_compat_task()) {
+		/* The gcc alloca implementation leaves garbage in the upper 32 bits of sp */
+		usp = (compat_uint_t)usp;
+		sigframe_size = PARISC_RT_SIGFRAME_SIZE32;
+	}
+#endif
+	frame = get_sigframe(&ksig->ka, usp, sigframe_size);
 
 	DBG(1,"SETUP_RT_FRAME: START\n");
 	DBG(1,"setup_rt_frame: frame %p info %p\n", frame, ksig->info);
 
+	start = (unsigned long) frame;
+	if (start >= user_addr_max() - sigframe_size)
+		return -EFAULT;
 	
 #ifdef CONFIG_64BIT
 
@@ -283,21 +291,11 @@ setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
 	   SIGRESTARTBLOCK_TRAMP+X. */
 	err |= __put_user(in_syscall ? INSN_LDI_R25_1 : INSN_LDI_R25_0,
 			&frame->tramp[SIGRESTARTBLOCK_TRAMP+0]);
-	err |= __put_user(INSN_LDI_R20, 
+	err |= __put_user(INSN_LDI_R20,
 			&frame->tramp[SIGRESTARTBLOCK_TRAMP+1]);
-	err |= __put_user(INSN_BLE_SR2_R0, 
+	err |= __put_user(INSN_BLE_SR2_R0,
 			&frame->tramp[SIGRESTARTBLOCK_TRAMP+2]);
 	err |= __put_user(INSN_NOP, &frame->tramp[SIGRESTARTBLOCK_TRAMP+3]);
-
-#if DEBUG_SIG
-	/* Assert that we're flushing in the correct space... */
-	{
-		unsigned long sid;
-		asm ("mfsp %%sr3,%0" : "=r" (sid));
-		DBG(1,"setup_rt_frame: Flushing 64 bytes at space %#x offset %p\n",
-		       sid, frame->tramp);
-	}
-#endif
 
 	start = (unsigned long) &frame->tramp[0];
 	end = (unsigned long) &frame->tramp[TRAMP_SIZE];
@@ -349,11 +347,6 @@ setup_rt_frame(struct ksignal *ksig, sigset_t *set, struct pt_regs *regs,
 
 	/* The syscall return path will create IAOQ values from r31.
 	 */
-	sigframe_size = PARISC_RT_SIGFRAME_SIZE;
-#ifdef CONFIG_64BIT
-	if (is_compat_task())
-		sigframe_size = PARISC_RT_SIGFRAME_SIZE32;
-#endif
 	if (in_syscall) {
 		regs->gr[31] = haddr;
 #ifdef CONFIG_64BIT
@@ -497,14 +490,13 @@ syscall_restart(struct pt_regs *regs, struct k_sigaction *ka)
 		DBG(1,"ERESTARTNOHAND: returning -EINTR\n");
 		regs->gr[28] = -EINTR;
 		break;
-
 	case -ERESTARTSYS:
 		if (!(ka->sa.sa_flags & SA_RESTART)) {
 			DBG(1,"ERESTARTSYS: putting -EINTR\n");
 			regs->gr[28] = -EINTR;
 			break;
 		}
-		/* fallthrough */
+		fallthrough;
 	case -ERESTARTNOINTR:
 		check_syscallno_in_delay_branch(regs);
 		break;
@@ -524,6 +516,10 @@ insert_restart_trampoline(struct pt_regs *regs)
 		unsigned long start = (unsigned long) &usp[2];
 		unsigned long end  = (unsigned long) &usp[5];
 		long err = 0;
+
+		/* check that we don't exceed the stack */
+		if (A(&usp[0]) >= user_addr_max() - 5 * sizeof(int))
+			return;
 
 		/* Setup a trampoline to restart the syscall
 		 * with __NR_restart_syscall
@@ -565,10 +561,6 @@ insert_restart_trampoline(struct pt_regs *regs)
 }
 
 /*
- * Note that 'init' is a special process: it doesn't get signals it doesn't
- * want to handle. Thus you cannot kill init even with a SIGKILL even by
- * mistake.
- *
  * We need to be able to restore the syscall arguments (r21-r26) to
  * restart syscalls.  Thus, the syscall path should save them in the
  * pt_regs structure (it's okay to do so since they are caller-save
@@ -605,11 +597,10 @@ do_signal(struct pt_regs *regs, long in_syscall)
 
 void do_notify_resume(struct pt_regs *regs, long in_syscall)
 {
-	if (test_thread_flag(TIF_SIGPENDING))
+	if (test_thread_flag(TIF_SIGPENDING) ||
+	    test_thread_flag(TIF_NOTIFY_SIGNAL))
 		do_signal(regs, in_syscall);
 
-	if (test_thread_flag(TIF_NOTIFY_RESUME)) {
-		clear_thread_flag(TIF_NOTIFY_RESUME);
+	if (test_thread_flag(TIF_NOTIFY_RESUME))
 		tracehook_notify_resume(regs);
-	}
 }

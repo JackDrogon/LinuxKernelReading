@@ -1,14 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Synopsys DesignWare Multimedia Card Interface driver
  *  (Based on NXP driver for lpc 31xx)
  *
  * Copyright (C) 2009 NXP Semiconductors
  * Copyright (C) 2009, 2010 Imagination Technologies Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #ifndef _DW_MMC_H_
@@ -18,6 +14,8 @@
 #include <linux/mmc/core.h>
 #include <linux/dmaengine.h>
 #include <linux/reset.h>
+#include <linux/fault-inject.h>
+#include <linux/hrtimer.h>
 #include <linux/interrupt.h>
 
 enum dw_mci_state {
@@ -234,6 +232,11 @@ struct dw_mci {
 	struct timer_list       cmd11_timer;
 	struct timer_list       cto_timer;
 	struct timer_list       dto_timer;
+
+#ifdef CONFIG_FAULT_INJECTION
+	struct fault_attr	fail_data_crc;
+	struct hrtimer		fault_timer;
+#endif
 };
 
 /* DMA ops for Internal/External DMAC interface */

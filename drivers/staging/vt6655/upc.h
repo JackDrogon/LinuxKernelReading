@@ -1,9 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0+
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Copyright (c) 1996, 2003 VIA Networking Technologies, Inc.
  * All rights reserved.
- *
- * File: upc.h
  *
  * Purpose: Macros to access device
  *
@@ -20,9 +18,7 @@
 
 /*---------------------  Export Definitions -------------------------*/
 
-
 /* For memory mapped IO */
-
 
 #define VNSvInPortB(dwIOAddress, pbyData) \
 	(*(pbyData) = ioread8(dwIOAddress))
@@ -44,7 +40,7 @@
 
 #define PCAvDelayByIO(uDelayUnit)				\
 do {								\
-	unsigned char byData;					\
+	unsigned char __maybe_unused byData;			\
 	unsigned long ii;					\
 								\
 	if (uDelayUnit <= 50) {					\

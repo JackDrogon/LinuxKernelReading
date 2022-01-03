@@ -50,17 +50,19 @@ static void sclp_cpu_capability_notify(struct work_struct *work)
 
 	s390_update_cpu_mhz();
 	pr_info("CPU capability may have changed\n");
-	get_online_cpus();
+	cpus_read_lock();
 	for_each_online_cpu(cpu) {
 		dev = get_cpu_device(cpu);
 		kobject_uevent(&dev->kobj, KOBJ_CHANGE);
 	}
-	put_online_cpus();
+	cpus_read_unlock();
 }
 
 static void __ref sclp_cpu_change_notify(struct work_struct *work)
 {
+	lock_device_hotplug();
 	smp_rescan_cpus();
+	unlock_device_hotplug();
 }
 
 static void sclp_conf_receiver_fn(struct evbuf_header *evbuf)

@@ -1,5 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #include <asm-generic/vmlinux.lds.h>
+#include <asm/vmlinux.lds.h>
+#include <asm/thread_info.h>
+#include <asm/page.h>
+#include <asm/sclp.h>
 
 OUTPUT_FORMAT("elf64-s390", "elf64-s390", "elf64-s390")
 OUTPUT_ARCH(s390:64-bit)
@@ -8,9 +12,6 @@ ENTRY(startup)
 
 SECTIONS
 {
-	/* Be careful parts of head_64.S assume startup_32 is at
-	 * address 0.
-	 */
 	. = 0;
 	.head.text : {
 		_head = . ;
@@ -26,32 +27,74 @@ SECTIONS
 	.rodata : {
 		_rodata = . ;
 		*(.rodata)	 /* read-only data */
-		*(EXCLUDE_FILE (*piggy.o) .rodata.compressed)
+		*(.rodata.*)
 		_erodata = . ;
 	}
+	NOTES
 	.data :	{
 		_data = . ;
 		*(.data)
 		*(.data.*)
 		_edata = . ;
 	}
-	startup_continue = 0x100000;
+
+	BOOT_DATA
+	BOOT_DATA_PRESERVED
+
+	/*
+	 * This is the BSS section of the decompressor and not of the decompressed Linux kernel.
+	 * It will consume place in the decompressor's image.
+	 */
+	. = ALIGN(8);
+	.bss : {
+		_bss = . ;
+		*(.bss)
+		*(.bss.*)
+		*(COMMON)
+		/*
+		 * Stacks for the decompressor
+		 */
+		. = ALIGN(PAGE_SIZE);
+		_dump_info_stack_start = .;
+		. += PAGE_SIZE;
+		_dump_info_stack_end = .;
+		. = ALIGN(PAGE_SIZE);
+		_stack_start = .;
+		. += BOOT_STACK_SIZE;
+		_stack_end = .;
+		_ebss = .;
+	}
+
+	/*
+	 * uncompressed image info used by the decompressor it should match
+	 * struct vmlinux_info. It comes from .vmlinux.info section of
+	 * uncompressed vmlinux in a form of info.o
+	 */
+	. = ALIGN(8);
+	.vmlinux.info : {
+		_vmlinux_info = .;
+		*(.vmlinux.info)
+	}
+
+	.decompressor.syms : {
+		. += 1; /* make sure we have \0 before the first entry */
+		. = ALIGN(2);
+		_decompressor_syms_start = .;
+		*(.decompressor.syms)
+		_decompressor_syms_end = .;
+	}
+
 #ifdef CONFIG_KERNEL_UNCOMPRESSED
 	. = 0x100000;
 #else
 	. = ALIGN(8);
 #endif
 	.rodata.compressed : {
-		*(.rodata.compressed)
-	}
-	. = ALIGN(256);
-	.bss : {
-		_bss = . ;
-		*(.bss)
-		*(.bss.*)
-		*(COMMON)
-		. = ALIGN(8);	/* For convenience during zeroing */
-		_ebss = .;
+		_compressed_start = .;
+		*(.vmlinux.bin.compressed)
+		_compressed_end = .;
+		FILL(0xff);
+		. = ALIGN(4096);
 	}
 	_end = .;
 

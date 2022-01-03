@@ -45,6 +45,10 @@
  * current job can make progress.
  */
 
+#include <linux/platform_device.h>
+
+#include <drm/drm_drv.h>
+
 #include "vc4_drv.h"
 #include "vc4_regs.h"
 
@@ -59,15 +63,22 @@ vc4_overflow_mem_work(struct work_struct *work)
 {
 	struct vc4_dev *vc4 =
 		container_of(work, struct vc4_dev, overflow_mem_work);
-	struct vc4_bo *bo = vc4->bin_bo;
+	struct vc4_bo *bo;
 	int bin_bo_slot;
 	struct vc4_exec_info *exec;
 	unsigned long irqflags;
 
+	mutex_lock(&vc4->bin_bo_lock);
+
+	if (!vc4->bin_bo)
+		goto complete;
+
+	bo = vc4->bin_bo;
+
 	bin_bo_slot = vc4_v3d_get_bin_slot(vc4);
 	if (bin_bo_slot < 0) {
 		DRM_ERROR("Couldn't allocate binner overflow mem\n");
-		return;
+		goto complete;
 	}
 
 	spin_lock_irqsave(&vc4->job_lock, irqflags);
@@ -98,6 +109,9 @@ vc4_overflow_mem_work(struct work_struct *work)
 	V3D_WRITE(V3D_INTCTL, V3D_INT_OUTOMEM);
 	V3D_WRITE(V3D_INTENA, V3D_INT_OUTOMEM);
 	spin_unlock_irqrestore(&vc4->job_lock, irqflags);
+
+complete:
+	mutex_unlock(&vc4->bin_bo_lock);
 }
 
 static void
@@ -182,7 +196,7 @@ vc4_irq_finish_render_job(struct drm_device *dev)
 	schedule_work(&vc4->job_done_work);
 }
 
-irqreturn_t
+static irqreturn_t
 vc4_irq(int irq, void *arg)
 {
 	struct drm_device *dev = arg;
@@ -224,10 +238,13 @@ vc4_irq(int irq, void *arg)
 	return status;
 }
 
-void
-vc4_irq_preinstall(struct drm_device *dev)
+static void
+vc4_irq_prepare(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
+
+	if (!vc4->v3d)
+		return;
 
 	init_waitqueue_head(&vc4->job_wait_queue);
 	INIT_WORK(&vc4->overflow_mem_work, vc4_overflow_mem_work);
@@ -238,21 +255,27 @@ vc4_irq_preinstall(struct drm_device *dev)
 	V3D_WRITE(V3D_INTCTL, V3D_DRIVER_IRQS);
 }
 
-int
-vc4_irq_postinstall(struct drm_device *dev)
+void
+vc4_irq_enable(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
 
-	/* Enable both the render done and out of memory interrupts. */
-	V3D_WRITE(V3D_INTENA, V3D_DRIVER_IRQS);
+	if (!vc4->v3d)
+		return;
 
-	return 0;
+	/* Enable the render done interrupts. The out-of-memory interrupt is
+	 * enabled as soon as we have a binner BO allocated.
+	 */
+	V3D_WRITE(V3D_INTENA, V3D_INT_FLDONE | V3D_INT_FRDONE);
 }
 
 void
-vc4_irq_uninstall(struct drm_device *dev)
+vc4_irq_disable(struct drm_device *dev)
 {
 	struct vc4_dev *vc4 = to_vc4_dev(dev);
+
+	if (!vc4->v3d)
+		return;
 
 	/* Disable sending interrupts for our driver's IRQs. */
 	V3D_WRITE(V3D_INTDIS, V3D_DRIVER_IRQS);
@@ -261,9 +284,35 @@ vc4_irq_uninstall(struct drm_device *dev)
 	V3D_WRITE(V3D_INTCTL, V3D_DRIVER_IRQS);
 
 	/* Finish any interrupt handler still in flight. */
-	disable_irq(dev->irq);
+	disable_irq(vc4->irq);
 
 	cancel_work_sync(&vc4->overflow_mem_work);
+}
+
+int vc4_irq_install(struct drm_device *dev, int irq)
+{
+	int ret;
+
+	if (irq == IRQ_NOTCONNECTED)
+		return -ENOTCONN;
+
+	vc4_irq_prepare(dev);
+
+	ret = request_irq(irq, vc4_irq, 0, dev->driver->name, dev);
+	if (ret)
+		return ret;
+
+	vc4_irq_enable(dev);
+
+	return 0;
+}
+
+void vc4_irq_uninstall(struct drm_device *dev)
+{
+	struct vc4_dev *vc4 = to_vc4_dev(dev);
+
+	vc4_irq_disable(dev);
+	free_irq(vc4->irq, dev);
 }
 
 /** Reinitializes interrupt registers when a GPU reset is performed. */

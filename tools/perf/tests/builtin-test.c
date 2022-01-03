@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/types.h>
 #include <dirent.h>
 #include <sys/wait.h>
@@ -21,8 +22,11 @@
 #include <subcmd/parse-options.h>
 #include "string2.h"
 #include "symbol.h"
+#include "util/rlimit.h"
 #include <linux/kernel.h>
+#include <linux/string.h>
 #include <subcmd/exec-cmd.h>
+#include <linux/zalloc.h>
 
 static bool dont_fork;
 
@@ -68,6 +72,17 @@ static struct test generic_tests[] = {
 	{
 		.desc = "Parse perf pmu format",
 		.func = test__pmu,
+	},
+	{
+		.desc = "PMU events",
+		.func = test__pmu_events,
+		.subtest = {
+			.skip_if_fail	= false,
+			.get_nr		= test__pmu_events_subtest_get_nr,
+			.get_desc	= test__pmu_events_subtest_get_desc,
+			.skip_reason	= test__pmu_events_subtest_skip_reason,
+		},
+
 	},
 	{
 		.desc = "DSO data read",
@@ -118,7 +133,18 @@ static struct test generic_tests[] = {
 	{
 		.desc = "Breakpoint accounting",
 		.func = test__bp_accounting,
-		.is_supported = test__bp_signal_is_supported,
+		.is_supported = test__bp_account_is_supported,
+	},
+	{
+		.desc = "Watchpoint",
+		.func = test__wp,
+		.is_supported = test__wp_is_supported,
+		.subtest = {
+			.skip_if_fail	= false,
+			.get_nr		= test__wp_subtest_get_nr,
+			.get_desc	= test__wp_subtest_get_desc,
+			.skip_reason    = test__wp_subtest_skip_reason,
+		},
 	},
 	{
 		.desc = "Number of exit events of a simple workload",
@@ -153,8 +179,8 @@ static struct test generic_tests[] = {
 		.func = test__mmap_thread_lookup,
 	},
 	{
-		.desc = "Share thread mg",
-		.func = test__thread_mg_share,
+		.desc = "Share thread maps",
+		.func = test__thread_maps_share,
 	},
 	{
 		.desc = "Sort output of hist entries",
@@ -247,6 +273,11 @@ static struct test generic_tests[] = {
 		.func = test__cpu_map_print,
 	},
 	{
+		.desc = "Merge cpu map",
+		.func = test__cpu_map_merge,
+	},
+
+	{
 		.desc = "Probe SDT events",
 		.func = test__sdt_event,
 	},
@@ -280,6 +311,60 @@ static struct test generic_tests[] = {
 		.func = test__mem2node,
 	},
 	{
+		.desc = "time utils",
+		.func = test__time_utils,
+	},
+	{
+		.desc = "Test jit_write_elf",
+		.func = test__jit_write_elf,
+	},
+	{
+		.desc = "Test libpfm4 support",
+		.func = test__pfm,
+		.subtest = {
+			.skip_if_fail	= true,
+			.get_nr		= test__pfm_subtest_get_nr,
+			.get_desc	= test__pfm_subtest_get_desc,
+		}
+	},
+	{
+		.desc = "Test api io",
+		.func = test__api_io,
+	},
+	{
+		.desc = "maps__merge_in",
+		.func = test__maps__merge_in,
+	},
+	{
+		.desc = "Demangle Java",
+		.func = test__demangle_java,
+	},
+	{
+		.desc = "Demangle OCaml",
+		.func = test__demangle_ocaml,
+	},
+	{
+		.desc = "Parse and process metrics",
+		.func = test__parse_metric,
+	},
+	{
+		.desc = "PE file support",
+		.func = test__pe_file_parsing,
+	},
+	{
+		.desc = "Event expansion for cgroups",
+		.func = test__expand_cgroup_events,
+	},
+	{
+		.desc = "Convert perf time to TSC",
+		.func = test__perf_time_to_tsc,
+		.is_supported = test__tsc_is_supported,
+	},
+	{
+		.desc = "dlfilter C API",
+		.func = test__dlfilter,
+	},
+	{
 		.func = NULL,
 	},
 };
@@ -289,7 +374,7 @@ static struct test *tests[] = {
 	arch_tests,
 };
 
-static bool perf_test__matches(struct test *test, int curr, int argc, const char *argv[])
+static bool perf_test__matches(const char *desc, int curr, int argc, const char *argv[])
 {
 	int i;
 
@@ -306,7 +391,7 @@ static bool perf_test__matches(struct test *test, int curr, int argc, const char
 			continue;
 		}
 
-		if (strcasestr(test->desc, argv[i]))
+		if (strcasestr(desc, argv[i]))
 			return true;
 	}
 
@@ -391,8 +476,15 @@ static int test_and_print(struct test *t, bool force_skip, int subtest)
 	case TEST_OK:
 		pr_info(" Ok\n");
 		break;
-	case TEST_SKIP:
-		color_fprintf(stderr, PERF_COLOR_YELLOW, " Skip\n");
+	case TEST_SKIP: {
+		const char *skip_reason = NULL;
+		if (t->subtest.skip_reason)
+			skip_reason = t->subtest.skip_reason(subtest);
+		if (skip_reason)
+			color_fprintf(stderr, PERF_COLOR_YELLOW, " Skip (%s)\n", skip_reason);
+		else
+			color_fprintf(stderr, PERF_COLOR_YELLOW, " Skip\n");
+	}
 		break;
 	case TEST_FAIL:
 	default:
@@ -414,14 +506,17 @@ static const char *shell_test__description(char *description, size_t size,
 	if (!fp)
 		return NULL;
 
+	/* Skip shebang */
+	while (fgetc(fp) != '\n');
+
 	description = fgets(description, size, fp);
 	fclose(fp);
 
-	return description ? trim(description + 1) : NULL;
+	return description ? strim(description + 1) : NULL;
 }
 
-#define for_each_shell_test(dir, base, ent)	\
-	while ((ent = readdir(dir)) != NULL)	\
+#define for_each_shell_test(entlist, nr, base, ent)	                \
+	for (int __i = 0; __i < nr && (ent = entlist[__i]); __i++)	\
 		if (!is_directory(base, ent) && ent->d_name[0] != '.')
 
 static const char *shell_tests__dir(char *path, size_t size)
@@ -448,8 +543,9 @@ static const char *shell_tests__dir(char *path, size_t size)
 
 static int shell_tests__max_desc_width(void)
 {
-	DIR *dir;
+	struct dirent **entlist;
 	struct dirent *ent;
+	int n_dirs, e;
 	char path_dir[PATH_MAX];
 	const char *path = shell_tests__dir(path_dir, sizeof(path_dir));
 	int width = 0;
@@ -457,11 +553,11 @@ static int shell_tests__max_desc_width(void)
 	if (path == NULL)
 		return -1;
 
-	dir = opendir(path);
-	if (!dir)
+	n_dirs = scandir(path, &entlist, NULL, alphasort);
+	if (n_dirs == -1)
 		return -1;
 
-	for_each_shell_test(dir, path, ent) {
+	for_each_shell_test(entlist, n_dirs, path, ent) {
 		char bf[256];
 		const char *desc = shell_test__description(bf, sizeof(bf), path, ent->d_name);
 
@@ -473,7 +569,9 @@ static int shell_tests__max_desc_width(void)
 		}
 	}
 
-	closedir(dir);
+	for (e = 0; e < n_dirs; e++)
+		zfree(&entlist[e]);
+	free(entlist);
 	return width;
 }
 
@@ -488,7 +586,10 @@ static int shell_test__run(struct test *test, int subdir __maybe_unused)
 	char script[PATH_MAX];
 	struct shell_test *st = test->priv;
 
-	path__join(script, sizeof(script), st->dir, st->file);
+	path__join(script, sizeof(script) - 3, st->dir, st->file);
+
+	if (verbose)
+		strncat(script, " -v", sizeof(script) - strlen(script) - 1);
 
 	err = system(script);
 	if (!err)
@@ -497,10 +598,12 @@ static int shell_test__run(struct test *test, int subdir __maybe_unused)
 	return WEXITSTATUS(err) == 2 ? TEST_SKIP : TEST_FAIL;
 }
 
-static int run_shell_tests(int argc, const char *argv[], int i, int width)
+static int run_shell_tests(int argc, const char *argv[], int i, int width,
+				struct intlist *skiplist)
 {
-	DIR *dir;
+	struct dirent **entlist;
 	struct dirent *ent;
+	int n_dirs, e;
 	char path_dir[PATH_MAX];
 	struct shell_test st = {
 		.dir = shell_tests__dir(path_dir, sizeof(path_dir)),
@@ -509,11 +612,14 @@ static int run_shell_tests(int argc, const char *argv[], int i, int width)
 	if (st.dir == NULL)
 		return -1;
 
-	dir = opendir(st.dir);
-	if (!dir)
+	n_dirs = scandir(st.dir, &entlist, NULL, alphasort);
+	if (n_dirs == -1) {
+		pr_err("failed to open shell test directory: %s\n",
+			st.dir);
 		return -1;
+	}
 
-	for_each_shell_test(dir, st.dir, ent) {
+	for_each_shell_test(entlist, n_dirs, st.dir, ent) {
 		int curr = i++;
 		char desc[256];
 		struct test test = {
@@ -522,15 +628,23 @@ static int run_shell_tests(int argc, const char *argv[], int i, int width)
 			.priv = &st,
 		};
 
-		if (!perf_test__matches(&test, curr, argc, argv))
+		if (!perf_test__matches(test.desc, curr, argc, argv))
 			continue;
 
 		st.file = ent->d_name;
 		pr_info("%2d: %-*s:", i, width, test.desc);
+
+		if (intlist__find(skiplist, i)) {
+			color_fprintf(stderr, PERF_COLOR_YELLOW, " Skip (user override)\n");
+			continue;
+		}
+
 		test_and_print(&test, false, -1);
 	}
 
-	closedir(dir);
+	for (e = 0; e < n_dirs; e++)
+		zfree(&entlist[e]);
+	free(entlist);
 	return 0;
 }
 
@@ -550,9 +664,25 @@ static int __cmd_test(int argc, const char *argv[], struct intlist *skiplist)
 
 	for_each_test(j, t) {
 		int curr = i++, err;
+		int subi;
 
-		if (!perf_test__matches(t, curr, argc, argv))
-			continue;
+		if (!perf_test__matches(t->desc, curr, argc, argv)) {
+			bool skip = true;
+			int subn;
+
+			if (!t->subtest.get_nr)
+				continue;
+
+			subn = t->subtest.get_nr();
+
+			for (subi = 0; subi < subn; subi++) {
+				if (perf_test__matches(t->subtest.get_desc(subi), curr, argc, argv))
+					skip = false;
+			}
+
+			if (skip)
+				continue;
+		}
 
 		if (t->is_supported && !t->is_supported()) {
 			pr_debug("%2d: %-*s: Disabled\n", i, width, t->desc);
@@ -580,7 +710,6 @@ static int __cmd_test(int argc, const char *argv[], struct intlist *skiplist)
 			 */
 			int subw = width > 2 ? width - 2 : width;
 			bool skip = false;
-			int subi;
 
 			if (subn <= 0) {
 				color_fprintf(stderr, PERF_COLOR_YELLOW,
@@ -597,6 +726,9 @@ static int __cmd_test(int argc, const char *argv[], struct intlist *skiplist)
 			}
 
 			for (subi = 0; subi < subn; subi++) {
+				if (!perf_test__matches(t->subtest.get_desc(subi), curr, argc, argv))
+					continue;
+
 				pr_info("%2d.%1d: %-*s:", i, subi + 1, subw,
 					t->subtest.get_desc(subi));
 				err = test_and_print(t, skip, subi);
@@ -606,37 +738,41 @@ static int __cmd_test(int argc, const char *argv[], struct intlist *skiplist)
 		}
 	}
 
-	return run_shell_tests(argc, argv, i, width);
+	return run_shell_tests(argc, argv, i, width, skiplist);
 }
 
 static int perf_test__list_shell(int argc, const char **argv, int i)
 {
-	DIR *dir;
+	struct dirent **entlist;
 	struct dirent *ent;
+	int n_dirs, e;
 	char path_dir[PATH_MAX];
 	const char *path = shell_tests__dir(path_dir, sizeof(path_dir));
 
 	if (path == NULL)
 		return -1;
 
-	dir = opendir(path);
-	if (!dir)
+	n_dirs = scandir(path, &entlist, NULL, alphasort);
+	if (n_dirs == -1)
 		return -1;
 
-	for_each_shell_test(dir, path, ent) {
+	for_each_shell_test(entlist, n_dirs, path, ent) {
 		int curr = i++;
 		char bf[256];
 		struct test t = {
 			.desc = shell_test__description(bf, sizeof(bf), path, ent->d_name),
 		};
 
-		if (!perf_test__matches(&t, curr, argc, argv))
+		if (!perf_test__matches(t.desc, curr, argc, argv))
 			continue;
 
 		pr_info("%2d: %s\n", i, t.desc);
+
 	}
 
-	closedir(dir);
+	for (e = 0; e < n_dirs; e++)
+		zfree(&entlist[e]);
+	free(entlist);
 	return 0;
 }
 
@@ -649,7 +785,7 @@ static int perf_test__list(int argc, const char **argv)
 	for_each_test(j, t) {
 		int curr = i++;
 
-		if (!perf_test__matches(t, curr, argc, argv) ||
+		if (!perf_test__matches(t->desc, curr, argc, argv) ||
 		    (t->is_supported && !t->is_supported()))
 			continue;
 
@@ -705,6 +841,11 @@ int cmd_test(int argc, const char **argv)
 
 	if (skip != NULL)
 		skiplist = intlist__new(skip);
+	/*
+	 * Tests that create BPF maps, for instance, need more than the 64K
+	 * default:
+	 */
+	rlimit__bump_memlock();
 
 	return __cmd_test(argc, argv, skiplist);
 }

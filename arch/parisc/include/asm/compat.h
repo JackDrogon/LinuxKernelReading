@@ -8,36 +8,19 @@
 #include <linux/sched.h>
 #include <linux/thread_info.h>
 
+#define compat_mode_t compat_mode_t
+typedef u16	compat_mode_t;
+
+#include <asm-generic/compat.h>
+
 #define COMPAT_USER_HZ 		100
 #define COMPAT_UTS_MACHINE	"parisc\0\0"
 
-typedef u32	compat_size_t;
-typedef s32	compat_ssize_t;
-typedef s32	compat_clock_t;
-typedef s32	compat_pid_t;
 typedef u32	__compat_uid_t;
 typedef u32	__compat_gid_t;
-typedef u32	__compat_uid32_t;
-typedef u32	__compat_gid32_t;
-typedef u16	compat_mode_t;
-typedef u32	compat_ino_t;
 typedef u32	compat_dev_t;
-typedef s32	compat_off_t;
-typedef s64	compat_loff_t;
 typedef u16	compat_nlink_t;
 typedef u16	compat_ipc_pid_t;
-typedef s32	compat_daddr_t;
-typedef u32	compat_caddr_t;
-typedef s32	compat_key_t;
-typedef s32	compat_timer_t;
-
-typedef s32	compat_int_t;
-typedef s32	compat_long_t;
-typedef s64	compat_s64;
-typedef u32	compat_uint_t;
-typedef u32	compat_ulong_t;
-typedef u64	compat_u64;
-typedef u32	compat_uptr_t;
 
 struct compat_stat {
 	compat_dev_t		st_dev;	/* dev_t is 32 bits on parisc */
@@ -48,11 +31,11 @@ struct compat_stat {
 	u16			st_reserved2;	/* old st_gid */
 	compat_dev_t		st_rdev;
 	compat_off_t		st_size;
-	compat_time_t		st_atime;
+	old_time32_t		st_atime;
 	u32			st_atime_nsec;
-	compat_time_t		st_mtime;
+	old_time32_t		st_mtime;
 	u32			st_mtime_nsec;
-	compat_time_t		st_ctime;
+	old_time32_t		st_ctime;
 	u32			st_ctime_nsec;
 	s32			st_blksize;
 	s32			st_blocks;
@@ -111,13 +94,6 @@ struct compat_sigcontext {
 };
 
 #define COMPAT_RLIM_INFINITY 0xffffffff
-
-typedef u32		compat_old_sigset_t;	/* at least 32 bits */
-
-#define _COMPAT_NSIG		64
-#define _COMPAT_NSIG_BPW	32
-
-typedef u32		compat_sigset_word;
 
 #define COMPAT_OFF_T_MAX	0x7fffffff
 
@@ -187,32 +163,9 @@ struct compat_shmid64_ds {
 #define COMPAT_ELF_NGREG 80
 typedef compat_ulong_t compat_elf_gregset_t[COMPAT_ELF_NGREG];
 
-/*
- * A pointer passed in from user mode. This should not
- * be used for syscall parameters, just declare them
- * as pointers because the syscall entry code will have
- * appropriately converted them already.
- */
-
-static inline void __user *compat_ptr(compat_uptr_t uptr)
-{
-	return (void __user *)(unsigned long)uptr;
-}
-
-static inline compat_uptr_t ptr_to_compat(void __user *uptr)
-{
-	return (u32)(unsigned long)uptr;
-}
-
-static __inline__ void __user *arch_compat_alloc_user_space(long len)
-{
-	struct pt_regs *regs = &current->thread.regs;
-	return (void __user *)regs->gr[30];
-}
-
 static inline int __is_compat_task(struct task_struct *t)
 {
-	return test_ti_thread_flag(task_thread_info(t), TIF_32BIT);
+	return test_tsk_thread_flag(t, TIF_32BIT);
 }
 
 static inline int is_compat_task(void)

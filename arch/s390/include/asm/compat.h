@@ -9,6 +9,11 @@
 #include <linux/sched/task_stack.h>
 #include <linux/thread_info.h>
 
+#define compat_mode_t	compat_mode_t
+typedef u16		compat_mode_t;
+
+#include <asm-generic/compat.h>
+
 #define __TYPE_IS_PTR(t) (!__builtin_types_compatible_p( \
 				typeof(0?(__force t)0:0ULL), u64))
 
@@ -51,34 +56,12 @@
 #define COMPAT_USER_HZ		100
 #define COMPAT_UTS_MACHINE	"s390\0\0\0\0"
 
-typedef u32		compat_size_t;
-typedef s32		compat_ssize_t;
-typedef s32		compat_clock_t;
-typedef s32		compat_pid_t;
 typedef u16		__compat_uid_t;
 typedef u16		__compat_gid_t;
-typedef u32		__compat_uid32_t;
-typedef u32		__compat_gid32_t;
-typedef u16		compat_mode_t;
-typedef u32		compat_ino_t;
 typedef u16		compat_dev_t;
-typedef s32		compat_off_t;
-typedef s64		compat_loff_t;
 typedef u16		compat_nlink_t;
 typedef u16		compat_ipc_pid_t;
-typedef s32		compat_daddr_t;
-typedef u32		compat_caddr_t;
 typedef __kernel_fsid_t	compat_fsid_t;
-typedef s32		compat_key_t;
-typedef s32		compat_timer_t;
-
-typedef s32		compat_int_t;
-typedef s32		compat_long_t;
-typedef s64		compat_s64;
-typedef u32		compat_uint_t;
-typedef u32		compat_ulong_t;
-typedef u64		compat_u64;
-typedef u32		compat_uptr_t;
 
 typedef struct {
 	u32 mask;
@@ -171,13 +154,6 @@ struct compat_statfs64 {
 
 #define COMPAT_RLIM_INFINITY		0xffffffff
 
-typedef u32		compat_old_sigset_t;	/* at least 32 bits */
-
-#define _COMPAT_NSIG		64
-#define _COMPAT_NSIG_BPW	32
-
-typedef u32		compat_sigset_word;
-
 #define COMPAT_OFF_T_MAX	0x7fffffff
 
 /*
@@ -191,27 +167,13 @@ static inline void __user *compat_ptr(compat_uptr_t uptr)
 {
 	return (void __user *)(unsigned long)(uptr & 0x7fffffffUL);
 }
-
-static inline compat_uptr_t ptr_to_compat(void __user *uptr)
-{
-	return (u32)(unsigned long)uptr;
-}
+#define compat_ptr(uptr) compat_ptr(uptr)
 
 #ifdef CONFIG_COMPAT
 
 static inline int is_compat_task(void)
 {
 	return test_thread_flag(TIF_31BIT);
-}
-
-static inline void __user *arch_compat_alloc_user_space(long len)
-{
-	unsigned long stack;
-
-	stack = KSTK_ESP(current);
-	if (is_compat_task())
-		stack &= 0x7fffffffUL;
-	return (void __user *) (stack - len);
 }
 
 #endif

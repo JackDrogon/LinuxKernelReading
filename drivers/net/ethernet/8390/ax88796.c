@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* drivers/net/ethernet/8390/ax88796.c
  *
  * Copyright 2005,2007 Simtec Electronics
@@ -5,10 +6,6 @@
  *
  * Asix AX88796 10/100 Ethernet controller support
  *	Based on ne.c, by Donald Becker, et-al.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -103,6 +100,13 @@ static inline struct ax_device *to_ax_dev(struct net_device *dev)
 	struct ei_device *ei_local = netdev_priv(dev);
 	return (struct ax_device *)(ei_local + 1);
 }
+
+void ax_NS8390_reinit(struct net_device *dev)
+{
+	ax_NS8390_init(dev, 1);
+}
+
+EXPORT_SYMBOL_GPL(ax_NS8390_reinit);
 
 /*
  * ax_initial_check
@@ -377,9 +381,7 @@ static int ax_mii_probe(struct net_device *dev)
 		return ret;
 	}
 
-	/* mask with MAC supported features */
-	phy_dev->supported &= PHY_BASIC_FEATURES;
-	phy_dev->advertising = phy_dev->supported;
+	phy_set_max_speed(phy_dev, SPEED_100);
 
 	netdev_info(dev, "PHY driver [%s] (mii_bus:phy_addr=%s, irq=%d)\n",
 		    phy_dev->drv->name, phydev_name(phy_dev), phy_dev->irq);
@@ -640,7 +642,7 @@ static void ax_eeprom_register_write(struct eeprom_93cx6 *eeprom)
 static const struct net_device_ops ax_netdev_ops = {
 	.ndo_open		= ax_open,
 	.ndo_stop		= ax_close,
-	.ndo_do_ioctl		= ax_ioctl,
+	.ndo_eth_ioctl		= ax_ioctl,
 
 	.ndo_start_xmit		= ax_ei_start_xmit,
 	.ndo_tx_timeout		= ax_ei_tx_timeout,

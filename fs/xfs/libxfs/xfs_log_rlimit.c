@@ -12,9 +12,7 @@
 #include "xfs_mount.h"
 #include "xfs_da_format.h"
 #include "xfs_trans_space.h"
-#include "xfs_inode.h"
 #include "xfs_da_btree.h"
-#include "xfs_attr_leaf.h"
 #include "xfs_bmap_btree.h"
 
 /*
@@ -94,7 +92,7 @@ xfs_log_calc_minimum_size(
 	if (tres.tr_logcount > 1)
 		max_logres *= tres.tr_logcount;
 
-	if (xfs_sb_version_haslogv2(&mp->m_sb) && mp->m_sb.sb_logsunit > 1)
+	if (xfs_has_logv2(mp) && mp->m_sb.sb_logsunit > 1)
 		lsunit = BTOBB(mp->m_sb.sb_logsunit);
 
 	/*
