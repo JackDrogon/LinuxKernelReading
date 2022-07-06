@@ -477,7 +477,8 @@ static int rawv6_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 	if (np->rxpmtu && np->rxopt.bits.rxpmtu)
 		return ipv6_recv_rxpmtu(sk, msg, len, addr_len);
 
-	skb = skb_recv_datagram(sk, flags, noblock, &err);
+	flags |= (noblock ? MSG_DONTWAIT : 0);
+	skb = skb_recv_datagram(sk, flags, &err);
 	if (!skb)
 		goto out;
 
@@ -1019,6 +1020,9 @@ static int do_rawv6_setsockopt(struct sock *sk, int level, int optname,
 {
 	struct raw6_sock *rp = raw6_sk(sk);
 	int val;
+
+	if (optlen < sizeof(val))
+		return -EINVAL;
 
 	if (copy_from_sockptr(&val, optval, sizeof(val)))
 		return -EFAULT;

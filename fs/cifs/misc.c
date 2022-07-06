@@ -75,6 +75,7 @@ sesInfoAlloc(void)
 		INIT_LIST_HEAD(&ret_buf->tcon_list);
 		mutex_init(&ret_buf->session_mutex);
 		spin_lock_init(&ret_buf->iface_lock);
+		spin_lock_init(&ret_buf->chan_lock);
 	}
 	return ret_buf;
 }
@@ -114,7 +115,7 @@ tconInfoAlloc(void)
 	}
 
 	atomic_inc(&tconInfoAllocCount);
-	ret_buf->tidStatus = CifsNew;
+	ret_buf->status = TID_NEW;
 	++ret_buf->tc_count;
 	INIT_LIST_HEAD(&ret_buf->openFileList);
 	INIT_LIST_HEAD(&ret_buf->tcon_list);
@@ -138,9 +139,6 @@ tconInfoFree(struct cifs_tcon *buf_to_free)
 	kfree(buf_to_free->nativeFileSystem);
 	kfree_sensitive(buf_to_free->password);
 	kfree(buf_to_free->crfid.fid);
-#ifdef CONFIG_CIFS_DFS_UPCALL
-	kfree(buf_to_free->dfs_path);
-#endif
 	kfree(buf_to_free);
 }
 
@@ -152,7 +150,7 @@ cifs_buf_get(void)
 	 * SMB2 header is bigger than CIFS one - no problems to clean some
 	 * more bytes for CIFS.
 	 */
-	size_t buf_size = sizeof(struct smb2_sync_hdr);
+	size_t buf_size = sizeof(struct smb2_hdr);
 
 	/*
 	 * We could use negotiated size instead of max_msgsize -
@@ -537,11 +535,11 @@ void cifs_set_oplock_level(struct cifsInodeInfo *cinode, __u32 oplock)
 	if (oplock == OPLOCK_EXCLUSIVE) {
 		cinode->oplock = CIFS_CACHE_WRITE_FLG | CIFS_CACHE_READ_FLG;
 		cifs_dbg(FYI, "Exclusive Oplock granted on inode %p\n",
-			 &cinode->vfs_inode);
+			 &cinode->netfs.inode);
 	} else if (oplock == OPLOCK_READ) {
 		cinode->oplock = CIFS_CACHE_READ_FLG;
 		cifs_dbg(FYI, "Level II Oplock granted on inode %p\n",
-			 &cinode->vfs_inode);
+			 &cinode->netfs.inode);
 	} else
 		cinode->oplock = 0;
 }
@@ -1211,18 +1209,23 @@ static struct super_block *__cifs_get_super(void (*f)(struct super_block *, void
 		.data = data,
 		.sb = NULL,
 	};
+	struct file_system_type **fs_type = (struct file_system_type *[]) {
+		&cifs_fs_type, &smb3_fs_type, NULL,
+	};
 
-	iterate_supers_type(&cifs_fs_type, f, &sd);
-
-	if (!sd.sb)
-		return ERR_PTR(-EINVAL);
-	/*
-	 * Grab an active reference in order to prevent automounts (DFS links)
-	 * of expiring and then freeing up our cifs superblock pointer while
-	 * we're doing failover.
-	 */
-	cifs_sb_active(sd.sb);
-	return sd.sb;
+	for (; *fs_type; fs_type++) {
+		iterate_supers_type(*fs_type, f, &sd);
+		if (sd.sb) {
+			/*
+			 * Grab an active reference in order to prevent automounts (DFS links)
+			 * of expiring and then freeing up our cifs superblock pointer while
+			 * we're doing failover.
+			 */
+			cifs_sb_active(sd.sb);
+			return sd.sb;
+		}
+	}
+	return ERR_PTR(-EINVAL);
 }
 
 static void __cifs_put_super(struct super_block *sb)
@@ -1287,69 +1290,65 @@ out:
 	return rc;
 }
 
-static void tcon_super_cb(struct super_block *sb, void *arg)
+int cifs_update_super_prepath(struct cifs_sb_info *cifs_sb, char *prefix)
 {
-	struct super_cb_data *sd = arg;
-	struct cifs_tcon *tcon = sd->data;
-	struct cifs_sb_info *cifs_sb;
-
-	if (sd->sb)
-		return;
-
-	cifs_sb = CIFS_SB(sb);
-	if (tcon->dfs_path && cifs_sb->origin_fullpath &&
-	    !strcasecmp(tcon->dfs_path, cifs_sb->origin_fullpath))
-		sd->sb = sb;
-}
-
-static inline struct super_block *cifs_get_tcon_super(struct cifs_tcon *tcon)
-{
-	return __cifs_get_super(tcon_super_cb, tcon);
-}
-
-static inline void cifs_put_tcon_super(struct super_block *sb)
-{
-	__cifs_put_super(sb);
-}
-#else
-static inline struct super_block *cifs_get_tcon_super(struct cifs_tcon *tcon)
-{
-	return ERR_PTR(-EOPNOTSUPP);
-}
-
-static inline void cifs_put_tcon_super(struct super_block *sb)
-{
-}
-#endif
-
-int update_super_prepath(struct cifs_tcon *tcon, char *prefix)
-{
-	struct super_block *sb;
-	struct cifs_sb_info *cifs_sb;
-	int rc = 0;
-
-	sb = cifs_get_tcon_super(tcon);
-	if (IS_ERR(sb))
-		return PTR_ERR(sb);
-
-	cifs_sb = CIFS_SB(sb);
-
 	kfree(cifs_sb->prepath);
 
 	if (prefix && *prefix) {
 		cifs_sb->prepath = kstrdup(prefix, GFP_ATOMIC);
-		if (!cifs_sb->prepath) {
-			rc = -ENOMEM;
-			goto out;
-		}
+		if (!cifs_sb->prepath)
+			return -ENOMEM;
 
 		convert_delimiter(cifs_sb->prepath, CIFS_DIR_SEP(cifs_sb));
 	} else
 		cifs_sb->prepath = NULL;
 
 	cifs_sb->mnt_cifs_flags |= CIFS_MOUNT_USE_PREFIX_PATH;
+	return 0;
+}
 
-out:
-	cifs_put_tcon_super(sb);
+/** cifs_dfs_query_info_nonascii_quirk
+ * Handle weird Windows SMB server behaviour. It responds with
+ * STATUS_OBJECT_NAME_INVALID code to SMB2 QUERY_INFO request
+ * for "\<server>\<dfsname>\<linkpath>" DFS reference,
+ * where <dfsname> contains non-ASCII unicode symbols.
+ *
+ * Check such DFS reference.
+ */
+int cifs_dfs_query_info_nonascii_quirk(const unsigned int xid,
+				       struct cifs_tcon *tcon,
+				       struct cifs_sb_info *cifs_sb,
+				       const char *linkpath)
+{
+	char *treename, *dfspath, sep;
+	int treenamelen, linkpathlen, rc;
+
+	treename = tcon->treeName;
+	/* MS-DFSC: All paths in REQ_GET_DFS_REFERRAL and RESP_GET_DFS_REFERRAL
+	 * messages MUST be encoded with exactly one leading backslash, not two
+	 * leading backslashes.
+	 */
+	sep = CIFS_DIR_SEP(cifs_sb);
+	if (treename[0] == sep && treename[1] == sep)
+		treename++;
+	linkpathlen = strlen(linkpath);
+	treenamelen = strnlen(treename, MAX_TREE_SIZE + 1);
+	dfspath = kzalloc(treenamelen + linkpathlen + 1, GFP_KERNEL);
+	if (!dfspath)
+		return -ENOMEM;
+	if (treenamelen)
+		memcpy(dfspath, treename, treenamelen);
+	memcpy(dfspath + treenamelen, linkpath, linkpathlen);
+	rc = dfs_cache_find(xid, tcon->ses, cifs_sb->local_nls,
+			    cifs_remap(cifs_sb), dfspath, NULL, NULL);
+	if (rc == 0) {
+		cifs_dbg(FYI, "DFS ref '%s' is found, emulate -EREMOTE\n",
+			 dfspath);
+		rc = -EREMOTE;
+	} else {
+		cifs_dbg(FYI, "%s: dfs_cache_find returned %d\n", __func__, rc);
+	}
+	kfree(dfspath);
 	return rc;
 }
+#endif

@@ -573,19 +573,26 @@ static u32 vduse_vdpa_get_vq_align(struct vdpa_device *vdpa)
 	return dev->vq_align;
 }
 
-static u64 vduse_vdpa_get_features(struct vdpa_device *vdpa)
+static u64 vduse_vdpa_get_device_features(struct vdpa_device *vdpa)
 {
 	struct vduse_dev *dev = vdpa_to_vduse(vdpa);
 
 	return dev->device_features;
 }
 
-static int vduse_vdpa_set_features(struct vdpa_device *vdpa, u64 features)
+static int vduse_vdpa_set_driver_features(struct vdpa_device *vdpa, u64 features)
 {
 	struct vduse_dev *dev = vdpa_to_vduse(vdpa);
 
 	dev->driver_features = features;
 	return 0;
+}
+
+static u64 vduse_vdpa_get_driver_features(struct vdpa_device *vdpa)
+{
+	struct vduse_dev *dev = vdpa_to_vduse(vdpa);
+
+	return dev->driver_features;
 }
 
 static void vduse_vdpa_set_config_cb(struct vdpa_device *vdpa,
@@ -655,7 +662,8 @@ static void vduse_vdpa_get_config(struct vdpa_device *vdpa, unsigned int offset,
 {
 	struct vduse_dev *dev = vdpa_to_vduse(vdpa);
 
-	if (len > dev->config_size - offset)
+	if (offset > dev->config_size ||
+	    len > dev->config_size - offset)
 		return;
 
 	memcpy(buf, dev->config + offset, len);
@@ -720,8 +728,9 @@ static const struct vdpa_config_ops vduse_vdpa_config_ops = {
 	.set_vq_state		= vduse_vdpa_set_vq_state,
 	.get_vq_state		= vduse_vdpa_get_vq_state,
 	.get_vq_align		= vduse_vdpa_get_vq_align,
-	.get_features		= vduse_vdpa_get_features,
-	.set_features		= vduse_vdpa_set_features,
+	.get_device_features	= vduse_vdpa_get_device_features,
+	.set_driver_features	= vduse_vdpa_set_driver_features,
+	.get_driver_features	= vduse_vdpa_get_driver_features,
 	.set_config_cb		= vduse_vdpa_set_config_cb,
 	.get_vq_num_max		= vduse_vdpa_get_vq_num_max,
 	.get_device_id		= vduse_vdpa_get_device_id,
@@ -975,7 +984,8 @@ static long vduse_dev_ioctl(struct file *file, unsigned int cmd,
 			break;
 
 		ret = -EINVAL;
-		if (config.length == 0 ||
+		if (config.offset > dev->config_size ||
+		    config.length == 0 ||
 		    config.length > dev->config_size - config.offset)
 			break;
 
@@ -1334,9 +1344,9 @@ static int vduse_create_dev(struct vduse_dev_config *config,
 
 	dev->minor = ret;
 	dev->msg_timeout = VDUSE_MSG_DEFAULT_TIMEOUT;
-	dev->dev = device_create(vduse_class, NULL,
-				 MKDEV(MAJOR(vduse_major), dev->minor),
-				 dev, "%s", config->name);
+	dev->dev = device_create_with_groups(vduse_class, NULL,
+				MKDEV(MAJOR(vduse_major), dev->minor),
+				dev, vduse_dev_groups, "%s", config->name);
 	if (IS_ERR(dev->dev)) {
 		ret = PTR_ERR(dev->dev);
 		goto err_dev;
@@ -1355,7 +1365,6 @@ err_domain:
 err_str:
 	vduse_dev_destroy(dev);
 err:
-	kvfree(config_buf);
 	return ret;
 }
 
@@ -1406,6 +1415,8 @@ static long vduse_ioctl(struct file *file, unsigned int cmd,
 		}
 		config.name[VDUSE_NAME_MAX - 1] = '\0';
 		ret = vduse_create_dev(&config, buf, control->api_version);
+		if (ret)
+			kvfree(buf);
 		break;
 	}
 	case VDUSE_DESTROY_DEV: {
@@ -1503,7 +1514,8 @@ static int vduse_dev_init_vdpa(struct vduse_dev *dev, const char *name)
 	return 0;
 }
 
-static int vdpa_dev_add(struct vdpa_mgmt_dev *mdev, const char *name)
+static int vdpa_dev_add(struct vdpa_mgmt_dev *mdev, const char *name,
+			const struct vdpa_dev_set_config *config)
 {
 	struct vduse_dev *dev;
 	int ret;
@@ -1583,7 +1595,6 @@ static int vduse_init(void)
 		return PTR_ERR(vduse_class);
 
 	vduse_class->devnode = vduse_devnode;
-	vduse_class->dev_groups = vduse_dev_groups;
 
 	ret = alloc_chrdev_region(&vduse_major, 0, VDUSE_DEV_MAX, "vduse");
 	if (ret)

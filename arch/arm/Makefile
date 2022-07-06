@@ -113,6 +113,10 @@ ifeq ($(CONFIG_CC_IS_CLANG),y)
 CFLAGS_ABI	+= -meabi gnu
 endif
 
+ifeq ($(CONFIG_CURRENT_POINTER_IN_TPIDRURO),y)
+CFLAGS_ABI	+= -mtp=cp15
+endif
+
 # Accept old syntax despite ".syntax unified"
 AFLAGS_NOWARN	:=$(call as-option,-Wa$(comma)-mno-warn-deprecated,-Wa$(comma)-W)
 
@@ -156,6 +160,7 @@ textofs-$(CONFIG_ARCH_AXXIA) := 0x00308000
 # Machine directory name.  This list is sorted alphanumerically
 # by CONFIG_* macro name.
 machine-$(CONFIG_ARCH_ACTIONS)		+= actions
+machine-$(CONFIG_ARCH_AIROHA)		+= airoha
 machine-$(CONFIG_ARCH_ALPINE)		+= alpine
 machine-$(CONFIG_ARCH_ARTPEC)		+= artpec
 machine-$(CONFIG_ARCH_ASPEED)           += aspeed
@@ -271,16 +276,22 @@ endif
 
 ifeq ($(CONFIG_STACKPROTECTOR_PER_TASK),y)
 prepare: stack_protector_prepare
+ifeq ($(CONFIG_CC_HAVE_STACKPROTECTOR_TLS),y)
+stack_protector_prepare: prepare0
+	$(eval KBUILD_CFLAGS += \
+		-mstack-protector-guard=tls \
+		-mstack-protector-guard-offset=$(shell	\
+			awk '{if ($$2 == "TSK_STACK_CANARY") print $$3;}'\
+				include/generated/asm-offsets.h))
+else
 stack_protector_prepare: prepare0
 	$(eval SSP_PLUGIN_CFLAGS := \
-		-fplugin-arg-arm_ssp_per_task_plugin-tso=$(shell	\
-			awk '{if ($$2 == "THREAD_SZ_ORDER") print $$3;}'\
-				include/generated/asm-offsets.h)	\
 		-fplugin-arg-arm_ssp_per_task_plugin-offset=$(shell	\
-			awk '{if ($$2 == "TI_STACK_CANARY") print $$3;}'\
+			awk '{if ($$2 == "TSK_STACK_CANARY") print $$3;}'\
 				include/generated/asm-offsets.h))
 	$(eval KBUILD_CFLAGS += $(SSP_PLUGIN_CFLAGS))
 	$(eval GCC_PLUGINS_CFLAGS += $(SSP_PLUGIN_CFLAGS))
+endif
 endif
 
 all:	$(notdir $(KBUILD_IMAGE))
@@ -316,10 +327,6 @@ vdso_install:
 ifeq ($(CONFIG_VDSO),y)
 	$(Q)$(MAKE) $(build)=arch/arm/vdso $@
 endif
-
-# We use MRPROPER_FILES and CLEAN_FILES now
-archclean:
-	$(Q)$(MAKE) $(clean)=$(boot)
 
 # My testing targets (bypasses dependencies)
 bp:;	$(Q)$(MAKE) $(build)=$(boot) MACHINE=$(MACHINE) $(boot)/bootpImage

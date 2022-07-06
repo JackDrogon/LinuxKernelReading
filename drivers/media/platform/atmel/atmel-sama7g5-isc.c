@@ -100,6 +100,30 @@ static const struct isc_format sama7g5_controller_formats[] = {
 	{
 		.fourcc		= V4L2_PIX_FMT_Y16,
 	},
+	{
+		.fourcc		= V4L2_PIX_FMT_SBGGR8,
+	},
+	{
+		.fourcc		= V4L2_PIX_FMT_SGBRG8,
+	},
+	{
+		.fourcc		= V4L2_PIX_FMT_SGRBG8,
+	},
+	{
+		.fourcc		= V4L2_PIX_FMT_SRGGB8,
+	},
+	{
+		.fourcc		= V4L2_PIX_FMT_SBGGR10,
+	},
+	{
+		.fourcc		= V4L2_PIX_FMT_SGBRG10,
+	},
+	{
+		.fourcc		= V4L2_PIX_FMT_SGRBG10,
+	},
+	{
+		.fourcc		= V4L2_PIX_FMT_SRGGB10,
+	},
 };
 
 /* This is a list of formats that the ISC can receive as *input* */
@@ -188,7 +212,7 @@ static struct isc_format sama7g5_formats_list[] = {
 	},
 	{
 		.fourcc		= V4L2_PIX_FMT_UYVY,
-		.mbus_code	= MEDIA_BUS_FMT_YUYV8_2X8,
+		.mbus_code	= MEDIA_BUS_FMT_UYVY8_2X8,
 		.pfe_cfg0_bps	= ISC_PFE_CFG0_BPS_EIGHT,
 	},
 	{
@@ -493,13 +517,14 @@ static int microchip_xisc_probe(struct platform_device *pdev)
 
 	list_for_each_entry(subdev_entity, &isc->subdev_entities, list) {
 		struct v4l2_async_subdev *asd;
+		struct fwnode_handle *fwnode =
+			of_fwnode_handle(subdev_entity->epn);
 
-		v4l2_async_notifier_init(&subdev_entity->notifier);
+		v4l2_async_nf_init(&subdev_entity->notifier);
 
-		asd = v4l2_async_notifier_add_fwnode_remote_subdev(
-					&subdev_entity->notifier,
-					of_fwnode_handle(subdev_entity->epn),
-					struct v4l2_async_subdev);
+		asd = v4l2_async_nf_add_fwnode_remote(&subdev_entity->notifier,
+						      fwnode,
+						      struct v4l2_async_subdev);
 
 		of_node_put(subdev_entity->epn);
 		subdev_entity->epn = NULL;
@@ -511,8 +536,8 @@ static int microchip_xisc_probe(struct platform_device *pdev)
 
 		subdev_entity->notifier.ops = &isc_async_ops;
 
-		ret = v4l2_async_notifier_register(&isc->v4l2_dev,
-						   &subdev_entity->notifier);
+		ret = v4l2_async_nf_register(&isc->v4l2_dev,
+					     &subdev_entity->notifier);
 		if (ret) {
 			dev_err(dev, "fail to register async notifier\n");
 			goto cleanup_subdev;
@@ -555,7 +580,6 @@ static int microchip_xisc_remove(struct platform_device *pdev)
 
 	v4l2_device_unregister(&isc->v4l2_dev);
 
-	clk_disable_unprepare(isc->ispck);
 	clk_disable_unprepare(isc->hclock);
 
 	isc_clk_cleanup(isc);
@@ -567,7 +591,6 @@ static int __maybe_unused xisc_runtime_suspend(struct device *dev)
 {
 	struct isc_device *isc = dev_get_drvdata(dev);
 
-	clk_disable_unprepare(isc->ispck);
 	clk_disable_unprepare(isc->hclock);
 
 	return 0;
@@ -581,10 +604,6 @@ static int __maybe_unused xisc_runtime_resume(struct device *dev)
 	ret = clk_prepare_enable(isc->hclock);
 	if (ret)
 		return ret;
-
-	ret = clk_prepare_enable(isc->ispck);
-	if (ret)
-		clk_disable_unprepare(isc->hclock);
 
 	return ret;
 }

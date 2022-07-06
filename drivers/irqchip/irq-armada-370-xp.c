@@ -308,7 +308,16 @@ static inline int armada_370_xp_msi_init(struct device_node *node,
 
 static void armada_xp_mpic_perf_init(void)
 {
-	unsigned long cpuid = cpu_logical_map(smp_processor_id());
+	unsigned long cpuid;
+
+	/*
+	 * This Performance Counter Overflow interrupt is specific for
+	 * Armada 370 and XP. It is not available on Armada 375, 38x and 39x.
+	 */
+	if (!of_machine_is_compatible("marvell,armada-370-xp"))
+		return;
+
+	cpuid = cpu_logical_map(smp_processor_id());
 
 	/* Enable Performance Counter Overflow interrupts */
 	writel(ARMADA_370_XP_INT_CAUSE_PERF(cpuid),
@@ -585,12 +594,7 @@ static void armada_370_xp_handle_msi_irq(struct pt_regs *regs, bool is_chained)
 
 		irq = msinr - PCI_MSI_DOORBELL_START;
 
-		if (is_chained)
-			generic_handle_domain_irq(armada_370_xp_msi_inner_domain,
-						  irq);
-		else
-			handle_domain_irq(armada_370_xp_msi_inner_domain,
-					  irq, regs);
+		generic_handle_domain_irq(armada_370_xp_msi_inner_domain, irq);
 	}
 }
 #else
@@ -642,8 +646,8 @@ armada_370_xp_handle_irq(struct pt_regs *regs)
 			break;
 
 		if (irqnr > 1) {
-			handle_domain_irq(armada_370_xp_mpic_domain,
-					  irqnr, regs);
+			generic_handle_domain_irq(armada_370_xp_mpic_domain,
+						  irqnr);
 			continue;
 		}
 
@@ -662,7 +666,7 @@ armada_370_xp_handle_irq(struct pt_regs *regs)
 				& IPI_DOORBELL_MASK;
 
 			for_each_set_bit(ipi, &ipimask, IPI_DOORBELL_END)
-				handle_domain_irq(ipi_domain, ipi, regs);
+				generic_handle_domain_irq(ipi_domain, ipi);
 		}
 #endif
 

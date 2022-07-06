@@ -121,10 +121,12 @@ enum lockdown_reason {
 	LOCKDOWN_DEBUGFS,
 	LOCKDOWN_XMON_WR,
 	LOCKDOWN_BPF_WRITE_USER,
+	LOCKDOWN_DBG_WRITE_KERNEL,
 	LOCKDOWN_INTEGRITY_MAX,
 	LOCKDOWN_KCORE,
 	LOCKDOWN_KPROBES,
 	LOCKDOWN_BPF_READ_KERNEL,
+	LOCKDOWN_DBG_READ_KERNEL,
 	LOCKDOWN_PERF,
 	LOCKDOWN_TRACEFS,
 	LOCKDOWN_XMON_RW,
@@ -179,7 +181,7 @@ struct xfrm_policy;
 struct xfrm_state;
 struct xfrm_user_sec_ctx;
 struct seq_file;
-struct sctp_endpoint;
+struct sctp_association;
 
 #ifdef CONFIG_MMU
 extern unsigned long mmap_min_addr;
@@ -313,12 +315,11 @@ int security_sb_clone_mnt_opts(const struct super_block *oldsb,
 				struct super_block *newsb,
 				unsigned long kern_flags,
 				unsigned long *set_kern_flags);
-int security_add_mnt_opt(const char *option, const char *val,
-				int len, void **mnt_opts);
 int security_move_mount(const struct path *from_path, const struct path *to_path);
 int security_dentry_init_security(struct dentry *dentry, int mode,
-					const struct qstr *name, void **ctx,
-					u32 *ctxlen);
+				  const struct qstr *name,
+				  const char **xattr_name, void **ctx,
+				  u32 *ctxlen);
 int security_dentry_create_files_as(struct dentry *dentry, int mode,
 					struct qstr *name,
 					const struct cred *old,
@@ -417,7 +418,7 @@ int security_task_fix_setgid(struct cred *new, const struct cred *old,
 int security_task_setpgid(struct task_struct *p, pid_t pgid);
 int security_task_getpgid(struct task_struct *p);
 int security_task_getsid(struct task_struct *p);
-void security_task_getsecid_subj(struct task_struct *p, u32 *secid);
+void security_current_getsecid_subj(u32 *secid);
 void security_task_getsecid_obj(struct task_struct *p, u32 *secid);
 int security_task_setnice(struct task_struct *p, int nice);
 int security_task_setioprio(struct task_struct *p, int ioprio);
@@ -710,12 +711,6 @@ static inline int security_sb_clone_mnt_opts(const struct super_block *oldsb,
 	return 0;
 }
 
-static inline int security_add_mnt_opt(const char *option, const char *val,
-					int len, void **mnt_opts)
-{
-	return 0;
-}
-
 static inline int security_move_mount(const struct path *from_path,
 				      const struct path *to_path)
 {
@@ -739,6 +734,7 @@ static inline void security_inode_free(struct inode *inode)
 static inline int security_dentry_init_security(struct dentry *dentry,
 						 int mode,
 						 const struct qstr *name,
+						 const char **xattr_name,
 						 void **ctx,
 						 u32 *ctxlen)
 {
@@ -1117,7 +1113,7 @@ static inline int security_task_getsid(struct task_struct *p)
 	return 0;
 }
 
-static inline void security_task_getsecid_subj(struct task_struct *p, u32 *secid)
+static inline void security_current_getsecid_subj(u32 *secid)
 {
 	*secid = 0;
 }
@@ -1423,11 +1419,13 @@ int security_tun_dev_create(void);
 int security_tun_dev_attach_queue(void *security);
 int security_tun_dev_attach(struct sock *sk, void *security);
 int security_tun_dev_open(void *security);
-int security_sctp_assoc_request(struct sctp_endpoint *ep, struct sk_buff *skb);
+int security_sctp_assoc_request(struct sctp_association *asoc, struct sk_buff *skb);
 int security_sctp_bind_connect(struct sock *sk, int optname,
 			       struct sockaddr *address, int addrlen);
-void security_sctp_sk_clone(struct sctp_endpoint *ep, struct sock *sk,
+void security_sctp_sk_clone(struct sctp_association *asoc, struct sock *sk,
 			    struct sock *newsk);
+int security_sctp_assoc_established(struct sctp_association *asoc,
+				    struct sk_buff *skb);
 
 #else	/* CONFIG_SECURITY_NETWORK */
 static inline int security_unix_stream_connect(struct sock *sock,
@@ -1629,7 +1627,7 @@ static inline int security_tun_dev_open(void *security)
 	return 0;
 }
 
-static inline int security_sctp_assoc_request(struct sctp_endpoint *ep,
+static inline int security_sctp_assoc_request(struct sctp_association *asoc,
 					      struct sk_buff *skb)
 {
 	return 0;
@@ -1642,10 +1640,16 @@ static inline int security_sctp_bind_connect(struct sock *sk, int optname,
 	return 0;
 }
 
-static inline void security_sctp_sk_clone(struct sctp_endpoint *ep,
+static inline void security_sctp_sk_clone(struct sctp_association *asoc,
 					  struct sock *sk,
 					  struct sock *newsk)
 {
+}
+
+static inline int security_sctp_assoc_established(struct sctp_association *asoc,
+						  struct sk_buff *skb)
+{
+	return 0;
 }
 #endif	/* CONFIG_SECURITY_NETWORK */
 
@@ -2042,5 +2046,21 @@ static inline int security_perf_event_write(struct perf_event *event)
 }
 #endif /* CONFIG_SECURITY */
 #endif /* CONFIG_PERF_EVENTS */
+
+#ifdef CONFIG_IO_URING
+#ifdef CONFIG_SECURITY
+extern int security_uring_override_creds(const struct cred *new);
+extern int security_uring_sqpoll(void);
+#else
+static inline int security_uring_override_creds(const struct cred *new)
+{
+	return 0;
+}
+static inline int security_uring_sqpoll(void)
+{
+	return 0;
+}
+#endif /* CONFIG_SECURITY */
+#endif /* CONFIG_IO_URING */
 
 #endif /* ! __LINUX_SECURITY_H */

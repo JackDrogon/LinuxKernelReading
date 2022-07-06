@@ -48,7 +48,7 @@ static const u32 supported_pixformats[] = {
 	V4L2_PIX_FMT_YVYU,
 	V4L2_PIX_FMT_UYVY,
 	V4L2_PIX_FMT_VYUY,
-	V4L2_PIX_FMT_HM12,
+	V4L2_PIX_FMT_NV12_16L16,
 	V4L2_PIX_FMT_NV12,
 	V4L2_PIX_FMT_NV21,
 	V4L2_PIX_FMT_YUV420,
@@ -368,7 +368,11 @@ static int sun6i_video_try_fmt(struct sun6i_video *video,
 	if (pixfmt->field == V4L2_FIELD_ANY)
 		pixfmt->field = V4L2_FIELD_NONE;
 
-	pixfmt->colorspace = V4L2_COLORSPACE_RAW;
+	if (pixfmt->pixelformat == V4L2_PIX_FMT_JPEG)
+		pixfmt->colorspace = V4L2_COLORSPACE_JPEG;
+	else
+		pixfmt->colorspace = V4L2_COLORSPACE_SRGB;
+
 	pixfmt->ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
 	pixfmt->quantization = V4L2_QUANTIZATION_DEFAULT;
 	pixfmt->xfer_func = V4L2_XFER_FUNC_DEFAULT;

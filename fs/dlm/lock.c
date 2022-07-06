@@ -53,6 +53,8 @@
                                    R: do_xxxx()
    L: receive_xxxx_reply()     <-  R: send_xxxx_reply()
 */
+#include <trace/events/dlm.h>
+
 #include <linux/types.h>
 #include <linux/rbtree.h>
 #include <linux/slab.h>
@@ -1178,7 +1180,8 @@ static void detach_lkb(struct dlm_lkb *lkb)
 	}
 }
 
-static int create_lkb(struct dlm_ls *ls, struct dlm_lkb **lkb_ret)
+static int _create_lkb(struct dlm_ls *ls, struct dlm_lkb **lkb_ret,
+		       int start, int end)
 {
 	struct dlm_lkb *lkb;
 	int rv;
@@ -1199,7 +1202,7 @@ static int create_lkb(struct dlm_ls *ls, struct dlm_lkb **lkb_ret)
 
 	idr_preload(GFP_NOFS);
 	spin_lock(&ls->ls_lkbidr_spin);
-	rv = idr_alloc(&ls->ls_lkbidr, lkb, 1, 0, GFP_NOWAIT);
+	rv = idr_alloc(&ls->ls_lkbidr, lkb, start, end, GFP_NOWAIT);
 	if (rv >= 0)
 		lkb->lkb_id = rv;
 	spin_unlock(&ls->ls_lkbidr_spin);
@@ -1213,6 +1216,11 @@ static int create_lkb(struct dlm_ls *ls, struct dlm_lkb **lkb_ret)
 
 	*lkb_ret = lkb;
 	return 0;
+}
+
+static int create_lkb(struct dlm_ls *ls, struct dlm_lkb **lkb_ret)
+{
+	return _create_lkb(ls, lkb_ret, 1, 0);
 }
 
 static int find_lkb(struct dlm_ls *ls, uint32_t lkid, struct dlm_lkb **lkb_ret)
@@ -1551,6 +1559,7 @@ static int _remove_from_waiters(struct dlm_lkb *lkb, int mstype,
 		lkb->lkb_wait_type = 0;
 		lkb->lkb_flags &= ~DLM_IFL_OVERLAP_CANCEL;
 		lkb->lkb_wait_count--;
+		unhold_lkb(lkb);
 		goto out_del;
 	}
 
@@ -1577,6 +1586,7 @@ static int _remove_from_waiters(struct dlm_lkb *lkb, int mstype,
 		log_error(ls, "remwait error %x reply %d wait_type %d overlap",
 			  lkb->lkb_id, mstype, lkb->lkb_wait_type);
 		lkb->lkb_wait_count--;
+		unhold_lkb(lkb);
 		lkb->lkb_wait_type = 0;
 	}
 
@@ -1618,21 +1628,24 @@ static int remove_from_waiters_ms(struct dlm_lkb *lkb, struct dlm_message *ms)
 }
 
 /* If there's an rsb for the same resource being removed, ensure
-   that the remove message is sent before the new lookup message.
-   It should be rare to need a delay here, but if not, then it may
-   be worthwhile to add a proper wait mechanism rather than a delay. */
+ * that the remove message is sent before the new lookup message.
+ */
+
+#define DLM_WAIT_PENDING_COND(ls, r)		\
+	(ls->ls_remove_len &&			\
+	 !rsb_cmp(r, ls->ls_remove_name,	\
+		  ls->ls_remove_len))
 
 static void wait_pending_remove(struct dlm_rsb *r)
 {
 	struct dlm_ls *ls = r->res_ls;
  restart:
 	spin_lock(&ls->ls_remove_spin);
-	if (ls->ls_remove_len &&
-	    !rsb_cmp(r, ls->ls_remove_name, ls->ls_remove_len)) {
+	if (DLM_WAIT_PENDING_COND(ls, r)) {
 		log_debug(ls, "delay lookup for remove dir %d %s",
-		  	  r->res_dir_nodeid, r->res_name);
+			  r->res_dir_nodeid, r->res_name);
 		spin_unlock(&ls->ls_remove_spin);
-		msleep(1);
+		wait_event(ls->ls_remove_wait, !DLM_WAIT_PENDING_COND(ls, r));
 		goto restart;
 	}
 	spin_unlock(&ls->ls_remove_spin);
@@ -1792,6 +1805,7 @@ static void shrink_bucket(struct dlm_ls *ls, int b)
 		ls->ls_remove_len = 0;
 		memset(ls->ls_remove_name, 0, DLM_RESNAME_MAXLEN);
 		spin_unlock(&ls->ls_remove_spin);
+		wake_up(&ls->ls_remove_wait);
 
 		dlm_free_rsb(r);
 	}
@@ -3437,6 +3451,8 @@ int dlm_lock(dlm_lockspace_t *lockspace,
 	if (error)
 		goto out;
 
+	trace_dlm_lock_start(ls, lkb, mode, flags);
+
 	error = set_lock_args(mode, lksb, flags, namelen, 0, ast,
 			      astarg, bast, &args);
 	if (error)
@@ -3450,6 +3466,8 @@ int dlm_lock(dlm_lockspace_t *lockspace,
 	if (error == -EINPROGRESS)
 		error = 0;
  out_put:
+	trace_dlm_lock_end(ls, lkb, mode, flags, error);
+
 	if (convert || error)
 		__put_lkb(ls, lkb);
 	if (error == -EAGAIN || error == -EDEADLK)
@@ -3481,6 +3499,8 @@ int dlm_unlock(dlm_lockspace_t *lockspace,
 	if (error)
 		goto out;
 
+	trace_dlm_unlock_start(ls, lkb, flags);
+
 	error = set_unlock_args(flags, astarg, &args);
 	if (error)
 		goto out_put;
@@ -3495,6 +3515,8 @@ int dlm_unlock(dlm_lockspace_t *lockspace,
 	if (error == -EBUSY && (flags & (DLM_LKF_CANCEL | DLM_LKF_FORCEUNLOCK)))
 		error = 0;
  out_put:
+	trace_dlm_unlock_end(ls, lkb, flags, error);
+
 	dlm_put_lkb(lkb);
  out:
 	dlm_unlock_recovery(ls);
@@ -3973,6 +3995,14 @@ static int validate_message(struct dlm_lkb *lkb, struct dlm_message *ms)
 	int from = ms->m_header.h_nodeid;
 	int error = 0;
 
+	/* currently mixing of user/kernel locks are not supported */
+	if (ms->m_flags & DLM_IFL_USER && ~lkb->lkb_flags & DLM_IFL_USER) {
+		log_error(lkb->lkb_resource->res_ls,
+			  "got user dlm message for a kernel lock");
+		error = -EINVAL;
+		goto out;
+	}
+
 	switch (ms->m_type) {
 	case DLM_MSG_CONVERT:
 	case DLM_MSG_UNLOCK:
@@ -4001,6 +4031,7 @@ static int validate_message(struct dlm_lkb *lkb, struct dlm_message *ms)
 		error = -EINVAL;
 	}
 
+out:
 	if (error)
 		log_error(lkb->lkb_resource->res_ls,
 			  "ignore invalid message %d from %d %x %x %x %d",
@@ -4065,6 +4096,7 @@ static void send_repeat_remove(struct dlm_ls *ls, char *ms_name, int len)
 	ls->ls_remove_len = 0;
 	memset(ls->ls_remove_name, 0, DLM_RESNAME_MAXLEN);
 	spin_unlock(&ls->ls_remove_spin);
+	wake_up(&ls->ls_remove_wait);
 }
 
 static int receive_request(struct dlm_ls *ls, struct dlm_message *ms)
@@ -5301,11 +5333,16 @@ int dlm_recover_waiters_post(struct dlm_ls *ls)
 		lkb->lkb_flags &= ~DLM_IFL_OVERLAP_UNLOCK;
 		lkb->lkb_flags &= ~DLM_IFL_OVERLAP_CANCEL;
 		lkb->lkb_wait_type = 0;
-		lkb->lkb_wait_count = 0;
+		/* drop all wait_count references we still
+		 * hold a reference for this iteration.
+		 */
+		while (lkb->lkb_wait_count) {
+			lkb->lkb_wait_count--;
+			unhold_lkb(lkb);
+		}
 		mutex_lock(&ls->ls_waiters_mutex);
 		list_del_init(&lkb->lkb_wait_reply);
 		mutex_unlock(&ls->ls_waiters_mutex);
-		unhold_lkb(lkb); /* for waiters list */
 
 		if (oc || ou) {
 			/* do an unlock or cancel instead of resending */
@@ -6298,6 +6335,67 @@ int dlm_user_purge(struct dlm_ls *ls, struct dlm_user_proc *proc,
 			do_purge(ls, nodeid, pid);
 		dlm_unlock_recovery(ls);
 	}
+	return error;
+}
+
+/* debug functionality */
+int dlm_debug_add_lkb(struct dlm_ls *ls, uint32_t lkb_id, char *name, int len,
+		      int lkb_nodeid, unsigned int lkb_flags, int lkb_status)
+{
+	struct dlm_lksb *lksb;
+	struct dlm_lkb *lkb;
+	struct dlm_rsb *r;
+	int error;
+
+	/* we currently can't set a valid user lock */
+	if (lkb_flags & DLM_IFL_USER)
+		return -EOPNOTSUPP;
+
+	lksb = kzalloc(sizeof(*lksb), GFP_NOFS);
+	if (!lksb)
+		return -ENOMEM;
+
+	error = _create_lkb(ls, &lkb, lkb_id, lkb_id + 1);
+	if (error) {
+		kfree(lksb);
+		return error;
+	}
+
+	lkb->lkb_flags = lkb_flags;
+	lkb->lkb_nodeid = lkb_nodeid;
+	lkb->lkb_lksb = lksb;
+	/* user specific pointer, just don't have it NULL for kernel locks */
+	if (~lkb_flags & DLM_IFL_USER)
+		lkb->lkb_astparam = (void *)0xDEADBEEF;
+
+	error = find_rsb(ls, name, len, 0, R_REQUEST, &r);
+	if (error) {
+		kfree(lksb);
+		__put_lkb(ls, lkb);
+		return error;
+	}
+
+	lock_rsb(r);
+	attach_lkb(r, lkb);
+	add_lkb(r, lkb, lkb_status);
+	unlock_rsb(r);
+	put_rsb(r);
+
+	return 0;
+}
+
+int dlm_debug_add_lkb_to_waiters(struct dlm_ls *ls, uint32_t lkb_id,
+				 int mstype, int to_nodeid)
+{
+	struct dlm_lkb *lkb;
+	int error;
+
+	error = find_lkb(ls, lkb_id, &lkb);
+	if (error)
+		return error;
+
+	error = add_to_waiters(lkb, mstype, to_nodeid);
+	dlm_put_lkb(lkb);
 	return error;
 }
 

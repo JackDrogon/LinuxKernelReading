@@ -17,7 +17,6 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/firmware.h>
-#include <linux/gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/pm_runtime.h>
@@ -1603,8 +1602,11 @@ static int ccs_power_on(struct device *dev)
 			usleep_range(1000, 2000);
 		} while (--retry);
 
-		if (!reset)
-			return -EIO;
+		if (!reset) {
+			dev_err(dev, "software reset failed\n");
+			rval = -EIO;
+			goto out_cci_addr_fail;
+		}
 	}
 
 	if (sensor->hwcfg.i2c_addr_alt) {
@@ -2758,13 +2760,13 @@ ident_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct ccs_module_info *minfo = &sensor->minfo;
 
 	if (minfo->mipi_manufacturer_id)
-		return snprintf(buf, PAGE_SIZE, "%4.4x%4.4x%2.2x\n",
-				minfo->mipi_manufacturer_id, minfo->model_id,
-				minfo->revision_number) + 1;
+		return sysfs_emit(buf, "%4.4x%4.4x%2.2x\n",
+				    minfo->mipi_manufacturer_id, minfo->model_id,
+				    minfo->revision_number) + 1;
 	else
-		return snprintf(buf, PAGE_SIZE, "%2.2x%4.4x%2.2x\n",
-				minfo->smia_manufacturer_id, minfo->model_id,
-				minfo->revision_number) + 1;
+		return sysfs_emit(buf, "%2.2x%4.4x%2.2x\n",
+				    minfo->smia_manufacturer_id, minfo->model_id,
+				    minfo->revision_number) + 1;
 }
 static DEVICE_ATTR_RO(ident);
 

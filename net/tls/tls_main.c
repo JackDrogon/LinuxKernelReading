@@ -423,6 +423,88 @@ static int do_tls_getsockopt_conf(struct sock *sk, char __user *optval,
 			rc = -EFAULT;
 		break;
 	}
+	case TLS_CIPHER_AES_CCM_128: {
+		struct tls12_crypto_info_aes_ccm_128 *aes_ccm_128 =
+			container_of(crypto_info,
+				struct tls12_crypto_info_aes_ccm_128, info);
+
+		if (len != sizeof(*aes_ccm_128)) {
+			rc = -EINVAL;
+			goto out;
+		}
+		lock_sock(sk);
+		memcpy(aes_ccm_128->iv,
+		       cctx->iv + TLS_CIPHER_AES_CCM_128_SALT_SIZE,
+		       TLS_CIPHER_AES_CCM_128_IV_SIZE);
+		memcpy(aes_ccm_128->rec_seq, cctx->rec_seq,
+		       TLS_CIPHER_AES_CCM_128_REC_SEQ_SIZE);
+		release_sock(sk);
+		if (copy_to_user(optval, aes_ccm_128, sizeof(*aes_ccm_128)))
+			rc = -EFAULT;
+		break;
+	}
+	case TLS_CIPHER_CHACHA20_POLY1305: {
+		struct tls12_crypto_info_chacha20_poly1305 *chacha20_poly1305 =
+			container_of(crypto_info,
+				struct tls12_crypto_info_chacha20_poly1305,
+				info);
+
+		if (len != sizeof(*chacha20_poly1305)) {
+			rc = -EINVAL;
+			goto out;
+		}
+		lock_sock(sk);
+		memcpy(chacha20_poly1305->iv,
+		       cctx->iv + TLS_CIPHER_CHACHA20_POLY1305_SALT_SIZE,
+		       TLS_CIPHER_CHACHA20_POLY1305_IV_SIZE);
+		memcpy(chacha20_poly1305->rec_seq, cctx->rec_seq,
+		       TLS_CIPHER_CHACHA20_POLY1305_REC_SEQ_SIZE);
+		release_sock(sk);
+		if (copy_to_user(optval, chacha20_poly1305,
+				sizeof(*chacha20_poly1305)))
+			rc = -EFAULT;
+		break;
+	}
+	case TLS_CIPHER_SM4_GCM: {
+		struct tls12_crypto_info_sm4_gcm *sm4_gcm_info =
+			container_of(crypto_info,
+				struct tls12_crypto_info_sm4_gcm, info);
+
+		if (len != sizeof(*sm4_gcm_info)) {
+			rc = -EINVAL;
+			goto out;
+		}
+		lock_sock(sk);
+		memcpy(sm4_gcm_info->iv,
+		       cctx->iv + TLS_CIPHER_SM4_GCM_SALT_SIZE,
+		       TLS_CIPHER_SM4_GCM_IV_SIZE);
+		memcpy(sm4_gcm_info->rec_seq, cctx->rec_seq,
+		       TLS_CIPHER_SM4_GCM_REC_SEQ_SIZE);
+		release_sock(sk);
+		if (copy_to_user(optval, sm4_gcm_info, sizeof(*sm4_gcm_info)))
+			rc = -EFAULT;
+		break;
+	}
+	case TLS_CIPHER_SM4_CCM: {
+		struct tls12_crypto_info_sm4_ccm *sm4_ccm_info =
+			container_of(crypto_info,
+				struct tls12_crypto_info_sm4_ccm, info);
+
+		if (len != sizeof(*sm4_ccm_info)) {
+			rc = -EINVAL;
+			goto out;
+		}
+		lock_sock(sk);
+		memcpy(sm4_ccm_info->iv,
+		       cctx->iv + TLS_CIPHER_SM4_CCM_SALT_SIZE,
+		       TLS_CIPHER_SM4_CCM_IV_SIZE);
+		memcpy(sm4_ccm_info->rec_seq, cctx->rec_seq,
+		       TLS_CIPHER_SM4_CCM_REC_SEQ_SIZE);
+		release_sock(sk);
+		if (copy_to_user(optval, sm4_ccm_info, sizeof(*sm4_ccm_info)))
+			rc = -EFAULT;
+		break;
+	}
 	default:
 		rc = -EINVAL;
 	}
@@ -471,10 +553,8 @@ static int do_tls_setsockopt_conf(struct sock *sk, sockptr_t optval,
 	int rc = 0;
 	int conf;
 
-	if (sockptr_is_null(optval) || (optlen < sizeof(*crypto_info))) {
-		rc = -EINVAL;
-		goto out;
-	}
+	if (sockptr_is_null(optval) || (optlen < sizeof(*crypto_info)))
+		return -EINVAL;
 
 	if (tx) {
 		crypto_info = &ctx->crypto_send.info;
@@ -485,10 +565,8 @@ static int do_tls_setsockopt_conf(struct sock *sk, sockptr_t optval,
 	}
 
 	/* Currently we don't support set crypto info more than one time */
-	if (TLS_CRYPTO_INFO_READY(crypto_info)) {
-		rc = -EBUSY;
-		goto out;
-	}
+	if (TLS_CRYPTO_INFO_READY(crypto_info))
+		return -EBUSY;
 
 	rc = copy_from_sockptr(crypto_info, optval, sizeof(*crypto_info));
 	if (rc) {
@@ -525,6 +603,12 @@ static int do_tls_setsockopt_conf(struct sock *sk, sockptr_t optval,
 		break;
 	case TLS_CIPHER_CHACHA20_POLY1305:
 		optsize = sizeof(struct tls12_crypto_info_chacha20_poly1305);
+		break;
+	case TLS_CIPHER_SM4_GCM:
+		optsize = sizeof(struct tls12_crypto_info_sm4_gcm);
+		break;
+	case TLS_CIPHER_SM4_CCM:
+		optsize = sizeof(struct tls12_crypto_info_sm4_ccm);
 		break;
 	default:
 		rc = -EINVAL;
@@ -584,11 +668,10 @@ static int do_tls_setsockopt_conf(struct sock *sk, sockptr_t optval,
 		ctx->sk_write_space = sk->sk_write_space;
 		sk->sk_write_space = tls_write_space;
 	}
-	goto out;
+	return 0;
 
 err_crypto_info:
 	memzero_explicit(crypto_info, sizeof(union tls_crypto_context));
-out:
 	return rc;
 }
 
@@ -789,6 +872,8 @@ static void tls_update(struct sock *sk, struct proto *p,
 		       void (*write_space)(struct sock *sk))
 {
 	struct tls_context *ctx;
+
+	WARN_ON_ONCE(sk->sk_prot == p);
 
 	ctx = tls_get_ctx(sk);
 	if (likely(ctx)) {

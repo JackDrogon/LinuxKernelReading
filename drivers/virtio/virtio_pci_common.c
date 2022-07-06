@@ -254,8 +254,7 @@ void vp_del_vqs(struct virtio_device *vdev)
 
 	if (vp_dev->msix_affinity_masks) {
 		for (i = 0; i < vp_dev->msix_vectors; i++)
-			if (vp_dev->msix_affinity_masks[i])
-				free_cpumask_var(vp_dev->msix_affinity_masks[i]);
+			free_cpumask_var(vp_dev->msix_affinity_masks[i]);
 	}
 
 	if (vp_dev->msix_enabled) {
@@ -549,6 +548,8 @@ static int virtio_pci_probe(struct pci_dev *pci_dev,
 
 	pci_set_master(pci_dev);
 
+	vp_dev->is_legacy = vp_dev->ldev.ioaddr ? true : false;
+
 	rc = register_virtio_device(&vp_dev->vdev);
 	reg_dev = vp_dev;
 	if (rc)
@@ -557,10 +558,10 @@ static int virtio_pci_probe(struct pci_dev *pci_dev,
 	return 0;
 
 err_register:
-	if (vp_dev->ioaddr)
-	     virtio_pci_legacy_remove(vp_dev);
+	if (vp_dev->is_legacy)
+		virtio_pci_legacy_remove(vp_dev);
 	else
-	     virtio_pci_modern_remove(vp_dev);
+		virtio_pci_modern_remove(vp_dev);
 err_probe:
 	pci_disable_device(pci_dev);
 err_enable_device:
@@ -587,7 +588,7 @@ static void virtio_pci_remove(struct pci_dev *pci_dev)
 
 	unregister_virtio_device(&vp_dev->vdev);
 
-	if (vp_dev->ioaddr)
+	if (vp_dev->is_legacy)
 		virtio_pci_legacy_remove(vp_dev);
 	else
 		virtio_pci_modern_remove(vp_dev);
