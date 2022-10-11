@@ -82,11 +82,11 @@ static unsigned long sdar_mod_val(u64 event)
 static void mmcra_sdar_mode(u64 event, unsigned long *mmcra)
 {
 	/*
-	 * MMCRA[SDAR_MODE] specifices how the SDAR should be updated in
-	 * continous sampling mode.
+	 * MMCRA[SDAR_MODE] specifies how the SDAR should be updated in
+	 * continuous sampling mode.
 	 *
 	 * Incase of Power8:
-	 * MMCRA[SDAR_MODE] will be programmed as "0b01" for continous sampling
+	 * MMCRA[SDAR_MODE] will be programmed as "0b01" for continuous sampling
 	 * mode and will be un-changed when setting MMCRA[63] (Marked events).
 	 *
 	 * Incase of Power9/power10:
@@ -685,6 +685,9 @@ int isa207_compute_mmcr(u64 event[], int n_ev,
 			else
 				mmcr2 |= MMCR2_FCS(pmc);
 		}
+
+		if (pevents[i]->attr.exclude_idle)
+			mmcr2 |= MMCR2_FCWAIT(pmc);
 
 		if (cpu_has_feature(CPU_FTR_ARCH_31)) {
 			if (pmc <= 4) {

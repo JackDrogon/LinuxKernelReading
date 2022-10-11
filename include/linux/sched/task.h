@@ -33,6 +33,9 @@ struct kernel_clone_args {
 	int cgroup;
 	int io_thread;
 	int kthread;
+	int idle;
+	int (*fn)(void *);
+	void *fn_arg;
 	struct cgroup *cgrp;
 	struct css_set *cset;
 };
@@ -68,8 +71,7 @@ extern void fork_init(void);
 
 extern void release_task(struct task_struct * p);
 
-extern int copy_thread(unsigned long, unsigned long, unsigned long,
-		       struct task_struct *, unsigned long);
+extern int copy_thread(struct task_struct *, const struct kernel_clone_args *);
 
 extern void flush_thread(void);
 
@@ -83,7 +85,7 @@ static inline void exit_thread(struct task_struct *tsk)
 extern __noreturn void do_group_exit(int);
 
 extern void exit_files(struct task_struct *);
-extern void exit_itimers(struct signal_struct *);
+extern void exit_itimers(struct task_struct *);
 
 extern pid_t kernel_clone(struct kernel_clone_args *kargs);
 struct task_struct *create_io_thread(int (*fn)(void *), void *arg, int node);

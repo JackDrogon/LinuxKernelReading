@@ -57,6 +57,7 @@ struct symbol {
 	u8 uaccess_safe      : 1;
 	u8 static_call_tramp : 1;
 	u8 retpoline_thunk   : 1;
+	u8 return_thunk      : 1;
 	u8 fentry            : 1;
 	u8 profiling_func    : 1;
 	struct list_head pv_target;
@@ -86,7 +87,7 @@ struct elf {
 	int fd;
 	bool changed;
 	char *name;
-	unsigned int text_size;
+	unsigned int text_size, num_files;
 	struct list_head sections;
 
 	int symbol_bits;
@@ -129,6 +130,16 @@ static inline u32 sec_offset_hash(struct section *sec, unsigned long offset)
 static inline u32 reloc_hash(struct reloc *reloc)
 {
 	return sec_offset_hash(reloc->sec, reloc->offset);
+}
+
+/*
+ * Try to see if it's a whole archive (vmlinux.o or module).
+ *
+ * Note this will miss the case where a module only has one source file.
+ */
+static inline bool has_multiple_files(struct elf *elf)
+{
+	return elf->num_files > 1;
 }
 
 struct elf *elf_open_read(const char *name, int flags);

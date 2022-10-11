@@ -119,6 +119,7 @@ const struct fs_parameter_spec smb3_fs_parameters[] = {
 	fsparam_flag_no("persistenthandles", Opt_persistent),
 	fsparam_flag_no("resilienthandles", Opt_resilient),
 	fsparam_flag_no("tcpnodelay", Opt_tcp_nodelay),
+	fsparam_flag("nosparse", Opt_nosparse),
 	fsparam_flag("domainauto", Opt_domainauto),
 	fsparam_flag("rdma", Opt_rdma),
 	fsparam_flag("modesid", Opt_modesid),
@@ -146,6 +147,7 @@ const struct fs_parameter_spec smb3_fs_parameters[] = {
 	fsparam_u32("actimeo", Opt_actimeo),
 	fsparam_u32("acdirmax", Opt_acdirmax),
 	fsparam_u32("acregmax", Opt_acregmax),
+	fsparam_u32("closetimeo", Opt_closetimeo),
 	fsparam_u32("echo_interval", Opt_echo_interval),
 	fsparam_u32("max_credits", Opt_max_credits),
 	fsparam_u32("handletimeout", Opt_handletimeout),
@@ -939,6 +941,9 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 	case Opt_nolease:
 		ctx->no_lease = 1;
 		break;
+	case Opt_nosparse:
+		ctx->no_sparse = 1;
+		break;
 	case Opt_nodelete:
 		ctx->nodelete = 1;
 		break;
@@ -1069,6 +1074,13 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 			break;
 		}
 		ctx->acdirmax = ctx->acregmax = HZ * result.uint_32;
+		break;
+	case Opt_closetimeo:
+		ctx->closetimeo = HZ * result.uint_32;
+		if (ctx->closetimeo > SMB3_MAX_DCLOSETIMEO) {
+			cifs_errorf(fc, "closetimeo too large\n");
+			goto cifs_parse_mount_err;
+		}
 		break;
 	case Opt_echo_interval:
 		ctx->echo_interval = result.uint_32;
@@ -1517,6 +1529,7 @@ int smb3_init_fs_context(struct fs_context *fc)
 
 	ctx->acregmax = CIFS_DEF_ACTIMEO;
 	ctx->acdirmax = CIFS_DEF_ACTIMEO;
+	ctx->closetimeo = SMB3_DEF_DCLOSETIMEO;
 
 	/* Most clients set timeout to 0, allows server to use its default */
 	ctx->handle_timeout = 0; /* See MS-SMB2 spec section 2.2.14.2.12 */

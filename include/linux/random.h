@@ -38,7 +38,6 @@ static inline int unregister_random_vmfork_notifier(struct notifier_block *nb) {
 #endif
 
 void get_random_bytes(void *buf, size_t len);
-size_t __must_check get_random_bytes_arch(void *buf, size_t len);
 u32 get_random_u32(void);
 u64 get_random_u64(void);
 static inline unsigned int get_random_int(void)
@@ -76,8 +75,6 @@ static inline unsigned long get_random_canary(void)
 int __init random_init(const char *command_line);
 bool rng_is_initialized(void);
 int wait_for_random_bytes(void);
-int register_random_ready_notifier(struct notifier_block *nb);
-int unregister_random_ready_notifier(struct notifier_block *nb);
 
 /* Calls wait_for_random_bytes() and then calls get_random_bytes(buf, nbytes).
  * Returns the result of the call to wait_for_random_bytes. */
@@ -109,32 +106,25 @@ declare_get_random_var_wait(long, unsigned long)
  */
 #include <linux/prandom.h>
 
-#ifdef CONFIG_ARCH_RANDOM
-# include <asm/archrandom.h>
-#else
-static inline bool __must_check arch_get_random_long(unsigned long *v) { return false; }
-static inline bool __must_check arch_get_random_int(unsigned int *v) { return false; }
-static inline bool __must_check arch_get_random_seed_long(unsigned long *v) { return false; }
-static inline bool __must_check arch_get_random_seed_int(unsigned int *v) { return false; }
-#endif
+#include <asm/archrandom.h>
 
 /*
  * Called from the boot CPU during startup; not valid to call once
  * secondary CPUs are up and preemption is possible.
  */
-#ifndef arch_get_random_seed_long_early
-static inline bool __init arch_get_random_seed_long_early(unsigned long *v)
+#ifndef arch_get_random_seed_longs_early
+static inline size_t __init arch_get_random_seed_longs_early(unsigned long *v, size_t max_longs)
 {
 	WARN_ON(system_state != SYSTEM_BOOTING);
-	return arch_get_random_seed_long(v);
+	return arch_get_random_seed_longs(v, max_longs);
 }
 #endif
 
-#ifndef arch_get_random_long_early
-static inline bool __init arch_get_random_long_early(unsigned long *v)
+#ifndef arch_get_random_longs_early
+static inline bool __init arch_get_random_longs_early(unsigned long *v, size_t max_longs)
 {
 	WARN_ON(system_state != SYSTEM_BOOTING);
-	return arch_get_random_long(v);
+	return arch_get_random_longs(v, max_longs);
 }
 #endif
 
