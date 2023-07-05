@@ -70,6 +70,7 @@ struct amdgpu_gmc_fault {
 	uint64_t	timestamp:48;
 	uint64_t	next:AMDGPU_GMC_FAULT_RING_ORDER;
 	atomic64_t	key;
+	uint64_t	timestamp_expiry:48;
 };
 
 /*
@@ -103,6 +104,8 @@ struct amdgpu_vmhub {
 	uint32_t        vm_cntx_cntl;
 	uint32_t	vm_cntx_cntl_vm_fault;
 	uint32_t	vm_l2_bank_select_reserved_cid2;
+
+	uint32_t	vm_contexts_disable;
 
 	const struct amdgpu_vmhub_funcs *vmhub_funcs;
 };
@@ -264,6 +267,32 @@ struct amdgpu_gmc {
 	u64 mall_size;
 	/* number of UMC instances */
 	int num_umc;
+	/* mode2 save restore */
+	u64 VM_L2_CNTL;
+	u64 VM_L2_CNTL2;
+	u64 VM_DUMMY_PAGE_FAULT_CNTL;
+	u64 VM_DUMMY_PAGE_FAULT_ADDR_LO32;
+	u64 VM_DUMMY_PAGE_FAULT_ADDR_HI32;
+	u64 VM_L2_PROTECTION_FAULT_CNTL;
+	u64 VM_L2_PROTECTION_FAULT_CNTL2;
+	u64 VM_L2_PROTECTION_FAULT_MM_CNTL3;
+	u64 VM_L2_PROTECTION_FAULT_MM_CNTL4;
+	u64 VM_L2_PROTECTION_FAULT_ADDR_LO32;
+	u64 VM_L2_PROTECTION_FAULT_ADDR_HI32;
+	u64 VM_DEBUG;
+	u64 VM_L2_MM_GROUP_RT_CLASSES;
+	u64 VM_L2_BANK_SELECT_RESERVED_CID;
+	u64 VM_L2_BANK_SELECT_RESERVED_CID2;
+	u64 VM_L2_CACHE_PARITY_CNTL;
+	u64 VM_L2_IH_LOG_CNTL;
+	u64 VM_CONTEXT_CNTL[16];
+	u64 VM_CONTEXT_PAGE_TABLE_BASE_ADDR_LO32[16];
+	u64 VM_CONTEXT_PAGE_TABLE_BASE_ADDR_HI32[16];
+	u64 VM_CONTEXT_PAGE_TABLE_START_ADDR_LO32[16];
+	u64 VM_CONTEXT_PAGE_TABLE_START_ADDR_HI32[16];
+	u64 VM_CONTEXT_PAGE_TABLE_END_ADDR_LO32[16];
+	u64 VM_CONTEXT_PAGE_TABLE_END_ADDR_HI32[16];
+	u64 MC_VM_MX_L1_TLB_CNTL;
 };
 
 #define amdgpu_gmc_flush_gpu_tlb(adev, vmid, vmhub, type) ((adev)->gmc.gmc_funcs->flush_gpu_tlb((adev), (vmid), (vmhub), (type)))
@@ -325,7 +354,7 @@ bool amdgpu_gmc_filter_faults(struct amdgpu_device *adev,
 			      uint16_t pasid, uint64_t timestamp);
 void amdgpu_gmc_filter_faults_remove(struct amdgpu_device *adev, uint64_t addr,
 				     uint16_t pasid);
-int amdgpu_gmc_ras_early_init(struct amdgpu_device *adev);
+int amdgpu_gmc_ras_sw_init(struct amdgpu_device *adev);
 int amdgpu_gmc_ras_late_init(struct amdgpu_device *adev);
 void amdgpu_gmc_ras_fini(struct amdgpu_device *adev);
 int amdgpu_gmc_allocate_vm_inv_eng(struct amdgpu_device *adev);

@@ -840,7 +840,7 @@ static int tas5086_probe(struct snd_soc_component *component)
 			snprintf(name, sizeof(name),
 				 "ti,mid-z-channel-%d", i + 1);
 
-			if (of_get_property(of_node, name, NULL) != NULL)
+			if (of_property_read_bool(of_node, name))
 				priv->pwm_start_mid_z |= 1 << i;
 		}
 	}
@@ -981,10 +981,8 @@ static int tas5086_i2c_probe(struct i2c_client *i2c)
 	return ret;
 }
 
-static int tas5086_i2c_remove(struct i2c_client *i2c)
-{
-	return 0;
-}
+static void tas5086_i2c_remove(struct i2c_client *i2c)
+{}
 
 static struct i2c_driver tas5086_i2c_driver = {
 	.driver = {

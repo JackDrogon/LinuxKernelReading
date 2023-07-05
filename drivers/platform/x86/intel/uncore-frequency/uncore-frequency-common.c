@@ -44,13 +44,17 @@ static ssize_t store_min_max_freq_khz(struct uncore_data *data,
 				      int min_max)
 {
 	unsigned int input;
+	int ret;
 
 	if (kstrtouint(buf, 10, &input))
 		return -EINVAL;
 
 	mutex_lock(&uncore_lock);
-	uncore_write(data, input, min_max);
+	ret = uncore_write(data, input, min_max);
 	mutex_unlock(&uncore_lock);
+
+	if (ret)
+		return ret;
 
 	return count;
 }
@@ -113,7 +117,7 @@ show_uncore_perf_status(current_freq_khz);
 		struct uncore_data *data = container_of(attr, struct uncore_data,\
 							  member_name##_dev_attr);\
 									\
-		return scnprintf(buf, PAGE_SIZE, "%u\n",		\
+		return sysfs_emit(buf, "%u\n",				\
 				 data->member_name);			\
 	}								\
 
@@ -224,9 +228,15 @@ int uncore_freq_common_init(int (*read_control_freq)(struct uncore_data *data, u
 	uncore_write = write_control_freq;
 	uncore_read_freq = read_freq;
 
-	if (!uncore_root_kobj)
-		uncore_root_kobj = kobject_create_and_add("intel_uncore_frequency",
-							    &cpu_subsys.dev_root->kobj);
+	if (!uncore_root_kobj) {
+		struct device *dev_root = bus_get_dev_root(&cpu_subsys);
+
+		if (dev_root) {
+			uncore_root_kobj = kobject_create_and_add("intel_uncore_frequency",
+								  &dev_root->kobj);
+			put_device(dev_root);
+		}
+	}
 	if (uncore_root_kobj)
 		++uncore_instance_count;
 	mutex_unlock(&uncore_lock);

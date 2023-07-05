@@ -82,7 +82,7 @@ static bool patch_address_for_sbs_tb_stereo(
 	return false;
 }
 
-static void gpu_addr_to_uma(struct dce_hwseq *hwseq,
+static bool gpu_addr_to_uma(struct dce_hwseq *hwseq,
 		PHYSICAL_ADDRESS_LOC *addr)
 {
 	bool is_in_uma;
@@ -98,6 +98,7 @@ static void gpu_addr_to_uma(struct dce_hwseq *hwseq,
 	} else {
 		is_in_uma = false;
 	}
+	return is_in_uma;
 }
 
 static void plane_address_in_gpu_space_to_uma(struct dce_hwseq *hwseq,
@@ -540,8 +541,6 @@ void dcn201_pipe_control_lock(
 	bool lock)
 {
 	struct dce_hwseq *hws = dc->hwseq;
-	struct hubp *hubp = NULL;
-	hubp = dc->res_pool->hubps[pipe->pipe_idx];
 	/* use TG master update lock to lock everything on the TG
 	 * therefore only top pipe need to lock
 	 */

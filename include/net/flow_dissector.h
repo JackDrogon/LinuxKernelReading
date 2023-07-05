@@ -14,7 +14,9 @@ struct sk_buff;
 
 /**
  * struct flow_dissector_key_control:
- * @thoff: Transport header offset
+ * @thoff:     Transport header offset
+ * @addr_type: Type of key. One of FLOW_DISSECTOR_KEY_*
+ * @flags:     Key flags. Any of FLOW_DIS_(IS_FRAGMENT|FIRST_FRAGENCAPSULATION)
  */
 struct flow_dissector_key_control {
 	u16	thoff;
@@ -36,8 +38,9 @@ enum flow_dissect_ret {
 
 /**
  * struct flow_dissector_key_basic:
- * @n_proto: Network header protocol (eg. IPv4/IPv6)
+ * @n_proto:  Network header protocol (eg. IPv4/IPv6)
  * @ip_proto: Transport header protocol (eg. TCP/UDP)
+ * @padding:  Unused
  */
 struct flow_dissector_key_basic {
 	__be16	n_proto;
@@ -135,6 +138,7 @@ struct flow_dissector_key_tipc {
  * struct flow_dissector_key_addrs:
  * @v4addrs: IPv4 addresses
  * @v6addrs: IPv6 addresses
+ * @tipckey: TIPC key
  */
 struct flow_dissector_key_addrs {
 	union {
@@ -145,14 +149,12 @@ struct flow_dissector_key_addrs {
 };
 
 /**
- * flow_dissector_key_arp:
- *	@ports: Operation, source and target addresses for an ARP header
- *              for Ethernet hardware addresses and IPv4 protocol addresses
- *		sip: Sender IP address
- *		tip: Target IP address
- *		op:  Operation
- *		sha: Sender hardware address
- *		tpa: Target hardware address
+ * struct flow_dissector_key_arp:
+ * @sip: Sender IP address
+ * @tip: Target IP address
+ * @op:  Operation
+ * @sha: Sender hardware address
+ * @tha: Target hardware address
  */
 struct flow_dissector_key_arp {
 	__u32 sip;
@@ -163,10 +165,10 @@ struct flow_dissector_key_arp {
 };
 
 /**
- * flow_dissector_key_tp_ports:
- *	@ports: port numbers of Transport header
- *		src: source port number
- *		dst: destination port number
+ * struct flow_dissector_key_ports:
+ * @ports: port numbers of Transport header
+ * @src: source port number
+ * @dst: destination port number
  */
 struct flow_dissector_key_ports {
 	union {
@@ -195,10 +197,10 @@ struct flow_dissector_key_ports_range {
 };
 
 /**
- * flow_dissector_key_icmp:
- *		type: ICMP type
- *		code: ICMP code
- *		id:   session identifier
+ * struct flow_dissector_key_icmp:
+ * @type: ICMP type
+ * @code: ICMP code
+ * @id:   Session identifier
  */
 struct flow_dissector_key_icmp {
 	struct {
@@ -289,6 +291,14 @@ struct flow_dissector_key_pppoe {
 	__be16 type;
 };
 
+/**
+ * struct flow_dissector_key_l2tpv3:
+ * @session_id: identifier for a l2tp session
+ */
+struct flow_dissector_key_l2tpv3 {
+	__be32 session_id;
+};
+
 enum flow_dissector_key_id {
 	FLOW_DISSECTOR_KEY_CONTROL, /* struct flow_dissector_key_control */
 	FLOW_DISSECTOR_KEY_BASIC, /* struct flow_dissector_key_basic */
@@ -320,6 +330,7 @@ enum flow_dissector_key_id {
 	FLOW_DISSECTOR_KEY_HASH, /* struct flow_dissector_key_hash */
 	FLOW_DISSECTOR_KEY_NUM_OF_VLANS, /* struct flow_dissector_key_num_of_vlans */
 	FLOW_DISSECTOR_KEY_PPPOE, /* struct flow_dissector_key_pppoe */
+	FLOW_DISSECTOR_KEY_L2TPV3, /* struct flow_dissector_key_l2tpv3 */
 
 	FLOW_DISSECTOR_KEY_MAX,
 };

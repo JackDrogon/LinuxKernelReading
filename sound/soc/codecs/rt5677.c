@@ -829,7 +829,7 @@ static int rt5677_parse_and_load_dsp(struct rt5677_priv *rt5677, const u8 *buf,
 	if (strncmp(elf_hdr->e_ident, ELFMAG, sizeof(ELFMAG) - 1))
 		dev_err(component->dev, "Wrong ELF header prefix\n");
 	if (elf_hdr->e_ehsize != sizeof(Elf32_Ehdr))
-		dev_err(component->dev, "Wrong Elf header size\n");
+		dev_err(component->dev, "Wrong ELF header size\n");
 	if (elf_hdr->e_machine != EM_XTENSA)
 		dev_err(component->dev, "Wrong DSP code file\n");
 
@@ -5693,11 +5693,9 @@ static int rt5677_i2c_probe(struct i2c_client *i2c)
 				      rt5677_dai, ARRAY_SIZE(rt5677_dai));
 }
 
-static int rt5677_i2c_remove(struct i2c_client *i2c)
+static void rt5677_i2c_remove(struct i2c_client *i2c)
 {
 	rt5677_free_gpio(i2c);
-
-	return 0;
 }
 
 static struct i2c_driver rt5677_i2c_driver = {
