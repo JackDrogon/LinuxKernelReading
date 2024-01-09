@@ -356,7 +356,7 @@ static int tmag5273_read_raw(struct iio_dev *indio_dev,
 	case IIO_CHAN_INFO_OFFSET:
 		switch (chan->type) {
 		case IIO_TEMP:
-			*val = -266314;
+			*val = -16005;
 			return IIO_VAL_INT;
 		default:
 			return -EINVAL;
@@ -734,7 +734,7 @@ static struct i2c_driver tmag5273_driver = {
 		.of_match_table = tmag5273_of_match,
 		.pm = pm_ptr(&tmag5273_pm_ops),
 	},
-	.probe_new = tmag5273_probe,
+	.probe = tmag5273_probe,
 	.id_table = tmag5273_id,
 };
 module_i2c_driver(tmag5273_driver);
