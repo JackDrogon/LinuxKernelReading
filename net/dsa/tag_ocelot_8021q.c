@@ -79,9 +79,9 @@ static struct sk_buff *ocelot_xmit(struct sk_buff *skb,
 static struct sk_buff *ocelot_rcv(struct sk_buff *skb,
 				  struct net_device *netdev)
 {
-	int src_port, switch_id;
+	int src_port = -1, switch_id = -1;
 
-	dsa_8021q_rcv(skb, &src_port, &switch_id, NULL);
+	dsa_8021q_rcv(skb, &src_port, &switch_id, NULL, NULL);
 
 	skb->dev = dsa_conduit_find_user(netdev, switch_id, src_port);
 	if (!skb->dev)
@@ -133,6 +133,7 @@ static const struct dsa_device_ops ocelot_8021q_netdev_ops = {
 	.promisc_on_conduit	= true,
 };
 
+MODULE_DESCRIPTION("DSA tag driver for Ocelot family of switches, using VLAN");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS_DSA_TAG_DRIVER(DSA_TAG_PROTO_OCELOT_8021Q, OCELOT_8021Q_NAME);
 

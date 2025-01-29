@@ -503,6 +503,7 @@ int qnoc_probe(struct platform_device *pdev)
 			    GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
+	data->num_nodes = num_nodes;
 
 	qp->num_intf_clks = cd_num;
 	for (i = 0; i < cd_num; i++)
@@ -597,7 +598,6 @@ regmap_done:
 
 		data->nodes[i] = node;
 	}
-	data->num_nodes = num_nodes;
 
 	clk_bulk_disable_unprepare(qp->num_intf_clks, qp->intf_clks);
 
@@ -627,14 +627,12 @@ err_disable_unprepare_clk:
 }
 EXPORT_SYMBOL(qnoc_probe);
 
-int qnoc_remove(struct platform_device *pdev)
+void qnoc_remove(struct platform_device *pdev)
 {
 	struct qcom_icc_provider *qp = platform_get_drvdata(pdev);
 
 	icc_provider_deregister(&qp->provider);
 	icc_nodes_remove(&qp->provider);
 	clk_disable_unprepare(qp->bus_clk);
-
-	return 0;
 }
 EXPORT_SYMBOL(qnoc_remove);
