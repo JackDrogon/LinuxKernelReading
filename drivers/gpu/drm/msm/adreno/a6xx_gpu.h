@@ -6,6 +6,10 @@
 
 
 #include "adreno_gpu.h"
+#include "a6xx_enums.xml.h"
+#include "a7xx_enums.xml.h"
+#include "a6xx_perfcntrs.xml.h"
+#include "a7xx_perfcntrs.xml.h"
 #include "a6xx.xml.h"
 
 #include "a6xx_gmu.h"
@@ -44,6 +48,7 @@ struct a6xx_info {
 	u32 gmu_chipid;
 	u32 gmu_cgc_mode;
 	u32 prim_fifo_threshold;
+	const struct a6xx_bcm *bcms;
 };
 
 struct a6xx_gpu {
@@ -290,5 +295,6 @@ int a6xx_gpu_state_put(struct msm_gpu_state *state);
 
 void a6xx_bus_clear_pending_transactions(struct adreno_gpu *adreno_gpu, bool gx_off);
 void a6xx_gpu_sw_reset(struct msm_gpu *gpu, bool assert);
+int a6xx_fenced_write(struct a6xx_gpu *gpu, u32 offset, u64 value, u32 mask, bool is_64b);
 
 #endif /* __A6XX_GPU_H__ */

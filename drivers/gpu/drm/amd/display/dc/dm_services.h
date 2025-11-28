@@ -291,6 +291,13 @@ bool dm_execute_dmub_cmd(const struct dc_context *ctx, union dmub_rb_cmd *cmd, e
 bool dm_execute_dmub_cmd_list(const struct dc_context *ctx, unsigned int count, union dmub_rb_cmd *cmd, enum dm_dmub_wait_type wait_type);
 
 /*
+ * ACPI Interfaces
+ */
+void dm_acpi_process_phy_transition_interlock(
+	const struct dc_context *ctx,
+	struct dm_process_phy_transition_init_params process_phy_transition_init_params);
+
+/*
  * Debug and verification hooks
  */
 
@@ -303,5 +310,7 @@ void dm_dtn_log_end(struct dc_context *ctx,
 	struct dc_log_buffer_ctx *log_ctx);
 
 char *dce_version_to_string(const int version);
+
+bool dc_supports_vrr(const enum dce_version v);
 
 #endif /* __DM_SERVICES_H__ */
