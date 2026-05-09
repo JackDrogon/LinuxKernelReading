@@ -206,7 +206,7 @@ static int lmh_probe(struct platform_device *pdev)
 	ret = qcom_scm_lmh_dcvsh(LMH_SUB_FN_THERMAL, LMH_TH_LOW_THRESHOLD, temp_low,
 				 LMH_NODE_DCVS, node_id, 0);
 	if (ret) {
-		dev_err(dev, "Error setting thermal ARM threshold%d\n", ret);
+		dev_err(dev, "Error setting thermal LOW threshold%d\n", ret);
 		return ret;
 	}
 
@@ -220,7 +220,7 @@ static int lmh_probe(struct platform_device *pdev)
 	/* Disable the irq and let cpufreq enable it when ready to handle the interrupt */
 	irq_set_status_flags(lmh_data->irq, IRQ_NOAUTOEN);
 	ret = devm_request_irq(dev, lmh_data->irq, lmh_handle_irq,
-			       IRQF_ONESHOT | IRQF_NO_SUSPEND,
+			       IRQF_NO_THREAD | IRQF_NO_SUSPEND,
 			       "lmh-irq", lmh_data);
 	if (ret) {
 		dev_err(dev, "Error %d registering irq %x\n", ret, lmh_data->irq);

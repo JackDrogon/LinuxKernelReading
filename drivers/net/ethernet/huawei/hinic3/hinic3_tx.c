@@ -16,20 +16,39 @@
 
 #define MIN_SKB_LEN                32
 
+static void hinic3_txq_clean_stats(struct hinic3_txq_stats *txq_stats)
+{
+	u64_stats_update_begin(&txq_stats->syncp);
+	txq_stats->bytes = 0;
+	txq_stats->packets = 0;
+	txq_stats->busy = 0;
+	txq_stats->dropped = 0;
+
+	txq_stats->skb_pad_err = 0;
+	txq_stats->frag_len_overflow = 0;
+	txq_stats->offload_cow_skb_err = 0;
+	txq_stats->map_frag_err = 0;
+	txq_stats->unknown_tunnel_pkt = 0;
+	txq_stats->frag_size_err = 0;
+	u64_stats_update_end(&txq_stats->syncp);
+}
+
+static void hinic3_txq_stats_init(struct hinic3_txq *txq)
+{
+	struct hinic3_txq_stats *txq_stats = &txq->txq_stats;
+
+	u64_stats_init(&txq_stats->syncp);
+	hinic3_txq_clean_stats(txq_stats);
+}
+
 int hinic3_alloc_txqs(struct net_device *netdev)
 {
 	struct hinic3_nic_dev *nic_dev = netdev_priv(netdev);
-	struct hinic3_hwdev *hwdev = nic_dev->hwdev;
 	u16 q_id, num_txqs = nic_dev->max_qps;
 	struct pci_dev *pdev = nic_dev->pdev;
 	struct hinic3_txq *txq;
 
-	if (!num_txqs) {
-		dev_err(hwdev->dev, "Cannot allocate zero size txqs\n");
-		return -EINVAL;
-	}
-
-	nic_dev->txqs = kcalloc(num_txqs, sizeof(*nic_dev->txqs),  GFP_KERNEL);
+	nic_dev->txqs = kzalloc_objs(*nic_dev->txqs, num_txqs);
 	if (!nic_dev->txqs)
 		return -ENOMEM;
 
@@ -40,6 +59,8 @@ int hinic3_alloc_txqs(struct net_device *netdev)
 		txq->q_depth = nic_dev->q_params.sq_depth;
 		txq->q_mask = nic_dev->q_params.sq_depth - 1;
 		txq->dev = &pdev->dev;
+
+		hinic3_txq_stats_init(txq);
 	}
 
 	return 0;
@@ -55,9 +76,9 @@ void hinic3_free_txqs(struct net_device *netdev)
 static void hinic3_set_buf_desc(struct hinic3_sq_bufdesc *buf_descs,
 				dma_addr_t addr, u32 len)
 {
-	buf_descs->hi_addr = upper_32_bits(addr);
-	buf_descs->lo_addr = lower_32_bits(addr);
-	buf_descs->len  = len;
+	buf_descs->hi_addr = cpu_to_le32(upper_32_bits(addr));
+	buf_descs->lo_addr = cpu_to_le32(lower_32_bits(addr));
+	buf_descs->len = cpu_to_le32(len);
 }
 
 static int hinic3_tx_map_skb(struct net_device *netdev, struct sk_buff *skb,
@@ -116,6 +137,7 @@ err_unmap_page:
 	}
 	dma_unmap_single(&pdev->dev, dma_info[0].dma, dma_info[0].len,
 			 DMA_TO_DEVICE);
+
 	return err;
 }
 
@@ -136,6 +158,23 @@ static void hinic3_tx_unmap_skb(struct net_device *netdev,
 
 	dma_unmap_single(&pdev->dev, dma_info[0].dma,
 			 dma_info[0].len, DMA_TO_DEVICE);
+}
+
+static void free_all_tx_skbs(struct net_device *netdev, u32 sq_depth,
+			     struct hinic3_tx_info *tx_info_arr)
+{
+	struct hinic3_tx_info *tx_info;
+	u32 idx;
+
+	for (idx = 0; idx < sq_depth; idx++) {
+		tx_info = &tx_info_arr[idx];
+		if (tx_info->skb) {
+			hinic3_tx_unmap_skb(netdev, tx_info->skb,
+					    tx_info->dma_info);
+			dev_kfree_skb_any(tx_info->skb);
+			tx_info->skb = NULL;
+		}
+	}
 }
 
 union hinic3_ip {
@@ -564,7 +603,6 @@ static netdev_tx_t hinic3_send_one_skb(struct sk_buff *skb,
 
 err_drop_pkt:
 	dev_kfree_skb_any(skb);
-
 err_out:
 	return NETDEV_TX_OK;
 }
@@ -584,6 +622,7 @@ netdev_tx_t hinic3_xmit_frame(struct sk_buff *skb, struct net_device *netdev)
 
 err_drop_pkt:
 	dev_kfree_skb_any(skb);
+
 	return NETDEV_TX_OK;
 }
 
@@ -632,6 +671,88 @@ void hinic3_flush_txqs(struct net_device *netdev)
 
 #define HINIC3_BDS_PER_SQ_WQEBB \
 	(HINIC3_SQ_WQEBB_SIZE / sizeof(struct hinic3_sq_bufdesc))
+
+int hinic3_alloc_txqs_res(struct net_device *netdev, u16 num_sq,
+			  u32 sq_depth, struct hinic3_dyna_txq_res *txqs_res)
+{
+	struct hinic3_dyna_txq_res *tqres;
+	int idx;
+
+	for (idx = 0; idx < num_sq; idx++) {
+		tqres = &txqs_res[idx];
+
+		tqres->tx_info = kzalloc_objs(*tqres->tx_info, sq_depth);
+		if (!tqres->tx_info)
+			goto err_free_tqres;
+
+		tqres->bds = kzalloc_objs(*tqres->bds,
+					  sq_depth * HINIC3_BDS_PER_SQ_WQEBB + HINIC3_MAX_SQ_SGE);
+		if (!tqres->bds) {
+			kfree(tqres->tx_info);
+			goto err_free_tqres;
+		}
+	}
+
+	return 0;
+
+err_free_tqres:
+	while (idx > 0) {
+		idx--;
+		tqres = &txqs_res[idx];
+
+		kfree(tqres->bds);
+		kfree(tqres->tx_info);
+	}
+
+	return -ENOMEM;
+}
+
+void hinic3_free_txqs_res(struct net_device *netdev, u16 num_sq,
+			  u32 sq_depth, struct hinic3_dyna_txq_res *txqs_res)
+{
+	struct hinic3_dyna_txq_res *tqres;
+	int idx;
+
+	for (idx = 0; idx < num_sq; idx++) {
+		tqres = &txqs_res[idx];
+
+		free_all_tx_skbs(netdev, sq_depth, tqres->tx_info);
+		kfree(tqres->bds);
+		kfree(tqres->tx_info);
+	}
+}
+
+int hinic3_configure_txqs(struct net_device *netdev, u16 num_sq,
+			  u32 sq_depth, struct hinic3_dyna_txq_res *txqs_res)
+{
+	struct hinic3_nic_dev *nic_dev = netdev_priv(netdev);
+	struct hinic3_dyna_txq_res *tqres;
+	struct hinic3_txq *txq;
+	u16 q_id;
+	u32 idx;
+
+	for (q_id = 0; q_id < num_sq; q_id++) {
+		txq = &nic_dev->txqs[q_id];
+		tqres = &txqs_res[q_id];
+
+		txq->q_depth = sq_depth;
+		txq->q_mask = sq_depth - 1;
+
+		txq->tx_stop_thrs = min(HINIC3_DEFAULT_STOP_THRS,
+					sq_depth / 20);
+		txq->tx_start_thrs = min(HINIC3_DEFAULT_START_THRS,
+					 sq_depth / 10);
+
+		txq->tx_info = tqres->tx_info;
+		for (idx = 0; idx < sq_depth; idx++)
+			txq->tx_info[idx].dma_info =
+				&tqres->bds[idx * HINIC3_BDS_PER_SQ_WQEBB];
+
+		txq->sq = &nic_dev->nic_io->sq[q_id];
+	}
+
+	return 0;
+}
 
 bool hinic3_tx_poll(struct hinic3_txq *txq, int budget)
 {

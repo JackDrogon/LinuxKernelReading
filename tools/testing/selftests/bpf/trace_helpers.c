@@ -19,15 +19,10 @@
 #include <gelf.h>
 #include "bpf/hashmap.h"
 #include "bpf/libbpf_internal.h"
+#include "bpf_util.h"
 
 #define TRACEFS_PIPE	"/sys/kernel/tracing/trace_pipe"
 #define DEBUGFS_PIPE	"/sys/kernel/debug/tracing/trace_pipe"
-
-struct ksyms {
-	struct ksym *syms;
-	size_t sym_cap;
-	size_t sym_cnt;
-};
 
 static struct ksyms *ksyms;
 static pthread_mutex_t ksyms_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -52,6 +47,8 @@ void free_kallsyms_local(struct ksyms *ksyms)
 
 	if (!ksyms)
 		return;
+
+	free(ksyms->filtered_syms);
 
 	if (!ksyms->syms) {
 		free(ksyms);
@@ -540,8 +537,21 @@ static bool is_invalid_entry(char *buf, bool kernel)
 	return false;
 }
 
+static const char * const trace_blacklist[] = {
+	"migrate_disable",
+	"migrate_enable",
+	"rcu_read_unlock_strict",
+	"preempt_count_add",
+	"preempt_count_sub",
+	"__rcu_read_lock",
+	"__rcu_read_unlock",
+	"bpf_get_numa_node_id",
+};
+
 static bool skip_entry(char *name)
 {
+	int i;
+
 	/*
 	 * We attach to almost all kernel functions and some of them
 	 * will cause 'suspicious RCU usage' when fprobe is attached
@@ -559,6 +569,12 @@ static bool skip_entry(char *name)
 	if (!strncmp(name, "__ftrace_invalid_address__",
 		     sizeof("__ftrace_invalid_address__") - 1))
 		return true;
+
+	for (i = 0; i < ARRAY_SIZE(trace_blacklist); i++) {
+		if (!strcmp(name, trace_blacklist[i]))
+			return true;
+	}
+
 	return false;
 }
 
@@ -590,7 +606,7 @@ static int search_kallsyms_compare(const void *p1, const struct ksym *p2)
 	return compare_name(p1, p2->name);
 }
 
-int bpf_get_ksyms(char ***symsp, size_t *cntp, bool kernel)
+int bpf_get_ksyms(struct ksyms **ksymsp, bool kernel)
 {
 	size_t cap = 0, cnt = 0;
 	char *name = NULL, *ksym_name, **syms = NULL;
@@ -617,8 +633,10 @@ int bpf_get_ksyms(char ***symsp, size_t *cntp, bool kernel)
 	else
 		f = fopen("/sys/kernel/debug/tracing/available_filter_functions", "r");
 
-	if (!f)
+	if (!f) {
+		free_kallsyms_local(ksyms);
 		return -EINVAL;
+	}
 
 	map = hashmap__new(symbol_hash, symbol_equal, NULL);
 	if (IS_ERR(map)) {
@@ -659,15 +677,18 @@ int bpf_get_ksyms(char ***symsp, size_t *cntp, bool kernel)
 		syms[cnt++] = ksym_name;
 	}
 
-	*symsp = syms;
-	*cntp = cnt;
+	ksyms->filtered_syms = syms;
+	ksyms->filtered_cnt = cnt;
+	*ksymsp = ksyms;
 
 error:
 	free(name);
 	fclose(f);
 	hashmap__free(map);
-	if (err)
+	if (err) {
 		free(syms);
+		free_kallsyms_local(ksyms);
+	}
 	return err;
 }
 

@@ -560,7 +560,7 @@ static int gmc_v8_0_mc_init(struct amdgpu_device *adev)
 	tmp = RREG32(mmCONFIG_MEMSIZE);
 	/* some boards may have garbage in the upper 16 bits */
 	if (tmp & 0xffff0000) {
-		DRM_INFO("Probable bad vram size: 0x%08x\n", tmp);
+		drm_info(adev_to_drm(adev), "Probably bad vram size: 0x%08x\n", tmp);
 		if (tmp & 0xffff)
 			tmp &= 0xffff;
 	}
@@ -716,11 +716,15 @@ static void gmc_v8_0_get_vm_pde(struct amdgpu_device *adev, int level,
 }
 
 static void gmc_v8_0_get_vm_pte(struct amdgpu_device *adev,
-				struct amdgpu_bo_va_mapping *mapping,
+				struct amdgpu_vm *vm,
+				struct amdgpu_bo *bo,
+				uint32_t vm_flags,
 				uint64_t *flags)
 {
-	*flags &= ~AMDGPU_PTE_EXECUTABLE;
-	*flags |= mapping->flags & AMDGPU_PTE_EXECUTABLE;
+	if (vm_flags & AMDGPU_VM_PAGE_EXECUTABLE)
+		*flags |= AMDGPU_PTE_EXECUTABLE;
+	else
+		*flags &= ~AMDGPU_PTE_EXECUTABLE;
 	*flags &= ~AMDGPU_PTE_PRT;
 }
 
@@ -935,7 +939,7 @@ static int gmc_v8_0_gart_enable(struct amdgpu_device *adev)
 		gmc_v8_0_set_fault_enable_default(adev, true);
 
 	gmc_v8_0_flush_gpu_tlb(adev, 0, 0, 0);
-	DRM_INFO("PCIE GART of %uM enabled (table at 0x%016llX).\n",
+	drm_info(adev_to_drm(adev), "PCIE GART of %uM enabled (table at 0x%016llX).\n",
 		 (unsigned int)(adev->gmc.gart_size >> 20),
 		 (unsigned long long)table_addr);
 	return 0;
@@ -1175,8 +1179,7 @@ static int gmc_v8_0_sw_init(struct amdgpu_ip_block *ip_block)
 		adev->vm_manager.vram_base_offset = 0;
 	}
 
-	adev->gmc.vm_fault_info = kmalloc(sizeof(struct kfd_vm_fault_info),
-					GFP_KERNEL);
+	adev->gmc.vm_fault_info = kmalloc_obj(struct kfd_vm_fault_info);
 	if (!adev->gmc.vm_fault_info)
 		return -ENOMEM;
 	atomic_set_release(&adev->gmc.vm_fault_info_updated, 0);
@@ -1433,6 +1436,12 @@ static int gmc_v8_0_process_interrupt(struct amdgpu_device *adev,
 			entry->src_id, entry->src_data[0]);
 		dev_err(adev->dev, " Can't decode VM fault info here on SRIOV VF\n");
 		return 0;
+	}
+
+	/* Delegate to the soft IRQ handler ring */
+	if (adev->irq.ih_soft.enabled && entry->ih != &adev->irq.ih_soft) {
+		amdgpu_irq_delegate(adev, entry, 4);
+		return 1;
 	}
 
 	addr = RREG32(mmVM_CONTEXT1_PROTECTION_FAULT_ADDR);

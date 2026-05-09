@@ -2716,8 +2716,7 @@ static int ixgbevf_set_interrupt_capability(struct ixgbevf_adapter *adapter)
 	v_budget = min_t(int, v_budget, num_online_cpus());
 	v_budget += NON_Q_VECTORS;
 
-	adapter->msix_entries = kcalloc(v_budget,
-					sizeof(struct msix_entry), GFP_KERNEL);
+	adapter->msix_entries = kzalloc_objs(struct msix_entry, v_budget);
 	if (!adapter->msix_entries)
 		return -ENOMEM;
 
@@ -4353,7 +4352,7 @@ static int ixgbevf_resume(struct device *dev_d)
 	struct pci_dev *pdev = to_pci_dev(dev_d);
 	struct net_device *netdev = pci_get_drvdata(pdev);
 	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
-	u32 err;
+	int err;
 
 	adapter->hw.hw_addr = adapter->io_addr;
 	smp_mb__before_atomic();
